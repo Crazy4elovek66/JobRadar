@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 from typing import Any
 
 import aiohttp
@@ -17,44 +18,69 @@ logger = logging.getLogger(__name__)
 class HHClient:
     API_URL = "https://api.hh.ru/vacancies"
     DICTIONARIES_URL = "https://api.hh.ru/dictionaries"
+    HEADERS = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/147.0.0.0 Safari/537.36"
+        ),
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Connection": "keep-alive",
+    }
 
     def __init__(self, area: str, proxy: str | None = None) -> None:
         self.area = area
         self.proxy = proxy
+        self.session: aiohttp.ClientSession | None = None
+
+    async def start(self) -> None:
+        if self.session is None or self.session.closed:
+            self.session = aiohttp.ClientSession(headers=self.HEADERS)
+
+    async def close(self) -> None:
+        if self.session is not None and not self.session.closed:
+            await self.session.close()
+        self.session = None
+
+    def _get_session(self) -> aiohttp.ClientSession:
+        if self.session is None or self.session.closed:
+            raise RuntimeError("HHClient session is not started")
+        return self.session
 
     async def ping(self) -> bool:
-        headers = {"User-Agent": "JobRadar/1.0 (admin@jobradar.ru)"}
+        session = self._get_session()
         try:
-            async with aiohttp.ClientSession(headers=headers) as session:
-                async with session.get(
-                    self.DICTIONARIES_URL,
-                    timeout=aiohttp.ClientTimeout(total=10),
-                    proxy=self.proxy,
-                ) as response:
-                    return response.status == 200
+            async with session.get(
+                self.DICTIONARIES_URL,
+                timeout=aiohttp.ClientTimeout(total=10),
+                proxy=self.proxy,
+            ) as response:
+                return response.status == 200
         except (aiohttp.ClientError, asyncio.TimeoutError):
             logger.warning("HH API ping failed")
             return False
 
     async def search_all(self) -> list[Vacancy]:
+        self._get_session()
         vacancies: dict[str, Vacancy] = {}
-        headers = {"User-Agent": "JobRadar/1.0 (admin@jobradar.ru)"}
-        async with aiohttp.ClientSession(headers=headers) as session:
-            for query in SEARCH_QUERIES:
-                try:
-                    found = await self.search(session, query)
-                except aiohttp.ClientError:
-                    logger.exception("HH API request failed for query=%s", query)
-                    continue
-                except asyncio.TimeoutError:
-                    logger.warning("HH API timeout for query=%s", query)
-                    continue
-                for vacancy in found:
-                    vacancies[vacancy.external_id] = vacancy
-                await asyncio.sleep(0.25)
+        queries = list(SEARCH_QUERIES)
+        for index, query in enumerate(queries):
+            found: list[Vacancy] = []
+            try:
+                found = await self.search(query)
+            except aiohttp.ClientError:
+                logger.exception("HH API request failed for query=%s", query)
+            except asyncio.TimeoutError:
+                logger.warning("HH API timeout for query=%s", query)
+            for vacancy in found:
+                vacancies[vacancy.external_id] = vacancy
+            if index < len(queries) - 1:
+                await asyncio.sleep(random.uniform(5.0, 10.0))
         return list(vacancies.values())
 
-    async def search(self, session: aiohttp.ClientSession, query: str) -> list[Vacancy]:
+    async def search(self, query: str) -> list[Vacancy]:
+        session = self._get_session()
         params = {
             "text": query,
             "area": self.area,
@@ -72,16 +98,13 @@ class HHClient:
             payload = await response.json()
 
         items = payload.get("items", [])
-        semaphore = asyncio.Semaphore(4)
-
-        async def fetch_detail(item: dict[str, Any]) -> dict[str, Any]:
-            async with semaphore:
-                detail = await self._fetch_detail(session, item.get("url"))
-                await asyncio.sleep(0.1)
-                return detail
-
-        details = await asyncio.gather(*(fetch_detail(item) for item in items))
-        return [self._parse_vacancy(item, detail) for item, detail in zip(items, details, strict=False)]
+        vacancies: list[Vacancy] = []
+        for index, item in enumerate(items):
+            detail = await self._fetch_detail(session, item.get("url"))
+            vacancies.append(self._parse_vacancy(item, detail))
+            if index < len(items) - 1:
+                await asyncio.sleep(random.uniform(1.5, 3.5))
+        return vacancies
 
     async def _fetch_detail(self, session: aiohttp.ClientSession, url: str | None) -> dict[str, Any]:
         if not url:

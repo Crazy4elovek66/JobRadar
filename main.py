@@ -4,6 +4,7 @@ import asyncio
 import logging
 
 from aiogram import Bot
+from aiogram.client.session.aiohttp import AiohttpSession
 
 from src.bot import build_dispatcher
 from src.config import load_settings
@@ -25,20 +26,30 @@ async def main() -> None:
     db = Database(settings.database_path)
     db.init()
 
-    bot = Bot(token=settings.telegram_bot_token)
+    # Телеграм идет через локальный прокси Happ (Финляндия), чтобы обойти блокировку РКН.
+    session = AiohttpSession(proxy="http://127.0.0.1:10809")
+    bot = Bot(token=settings.telegram_bot_token, session=session)
     hh_client = HHClient(area=settings.hh_area, proxy=settings.hh_proxy)
+    await hh_client.start()
+
     search_service = SearchService(db=db, hh_client=hh_client, min_score_to_send=settings.min_score_to_send)
     dispatcher = build_dispatcher(settings=settings, db=db, search_service=search_service)
     scheduler = create_scheduler(bot=bot, settings=settings, search_service=search_service)
-    scheduler.start()
 
-    if await hh_client.ping():
-        logger.info("Связь с HH API успешно установлена")
-    else:
-        logger.warning("Не удалось подключиться к HH API. Проверьте настройки прокси или сеть!")
+    try:
+        scheduler.start()
 
-    logger.info("JobRadar started")
-    await dispatcher.start_polling(bot)
+        if await hh_client.ping():
+            logger.info("Связь с HH API успешно установлена")
+        else:
+            logger.warning("Не удалось подключиться к HH API. Проверьте настройки прокси или сеть!")
+
+        logger.info("JobRadar started")
+        await dispatcher.start_polling(bot)
+    finally:
+        if scheduler.running:
+            scheduler.shutdown(wait=False)
+        await hh_client.close()
 
 
 if __name__ == "__main__":
