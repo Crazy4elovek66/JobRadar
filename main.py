@@ -26,10 +26,14 @@ async def main() -> None:
     db = Database(settings.database_path)
     db.init()
 
-    # Телеграм идет через локальный прокси Happ (Финляндия), чтобы обойти блокировку РКН.
-    session = AiohttpSession(proxy="http://127.0.0.1:10809")
+    session = AiohttpSession(proxy=settings.telegram_proxy)
     bot = Bot(token=settings.telegram_bot_token, session=session)
-    hh_client = HHClient(area=settings.hh_area, proxy=settings.hh_proxy)
+    hh_client = HHClient(
+        area=settings.hh_area,
+        proxies=settings.hh_proxies,
+        user_agent=settings.hh_user_agent,
+        access_token=settings.hh_access_token,
+    )
     await hh_client.start()
 
     search_service = SearchService(db=db, hh_client=hh_client, min_score_to_send=settings.min_score_to_send)

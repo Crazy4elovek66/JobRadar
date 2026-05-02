@@ -1,89 +1,104 @@
+from __future__ import annotations
+
 import asyncio
-import aiohttp
-from pathlib import Path
 import sys
+from pathlib import Path
+
+import aiohttp
+
 
 INPUT_FILE = "proxies.txt"
 OUTPUT_FILE = "good_proxies.txt"
-TEST_URL = "https://api.hh.ru/vacancies?text=test&per_page=1"
+TEST_URL = "https://api.hh.ru/vacancies?text=test&area=113&per_page=1"
+CONCURRENCY = 20
+TIMEOUT = 12
+HEADERS = {
+    "User-Agent": "JobRadar/1.0 (contact: local)",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "ru-RU,ru;q=0.9",
+}
 
-# Настройки сети
-CONCURRENCY = 30  # Снизили до 30, чтобы не забивать роутер
-TIMEOUT = 5
 
-async def worker(queue: asyncio.Queue, session: aiohttp.ClientSession, stop_event: asyncio.Event, working_proxies: list):
-    while not stop_event.is_set():
+def normalize_proxy(proxy: str) -> str:
+    proxy = proxy.strip()
+    if "://" in proxy:
+        return proxy
+    return f"http://{proxy}"
+
+
+async def worker(
+    queue: asyncio.Queue[str],
+    session: aiohttp.ClientSession,
+    working_proxies: list[str],
+) -> None:
+    while True:
         try:
             proxy = queue.get_nowait()
         except asyncio.QueueEmpty:
-            break
-            
-        formatted_proxy = proxy.strip()
-        if not formatted_proxy.startswith("http"):
-            formatted_proxy = f"http://{formatted_proxy}"
-            
+            return
+
+        proxy_url = normalize_proxy(proxy)
         try:
             async with session.get(
                 TEST_URL,
-                proxy=formatted_proxy,
-                timeout=aiohttp.ClientTimeout(total=TIMEOUT)
+                proxy=proxy_url,
+                timeout=aiohttp.ClientTimeout(total=TIMEOUT),
             ) as response:
+                body = await response.text()
                 if response.status == 200:
-                    print(f"\n[+] НАЙДЕН РАБОЧИЙ ПРОКСИ: {formatted_proxy}")
-                    working_proxies.append(formatted_proxy)
-                    stop_event.set() # Сигнал всем остальным немедленно остановиться
-        except Exception:
-            # Ошибки таймаута или соединения тихо игнорируем
-            pass
+                    print(f"[OK] HH пропускает прокси: {proxy_url}")
+                    working_proxies.append(proxy_url)
+                elif response.status == 403:
+                    print(f"[403] HH блокирует этот маршрут: {proxy_url}")
+                else:
+                    print(f"[{response.status}] Неожиданный ответ через {proxy_url}: {body[:120]}")
+        except asyncio.TimeoutError:
+            print(f"[TIMEOUT] Прокси не ответил вовремя: {proxy_url}")
+        except aiohttp.ClientHttpProxyError as exc:
+            print(f"[PROXY] Некорректный HTTP-прокси {proxy_url}: {exc.status}")
+        except aiohttp.ClientError as exc:
+            print(f"[NET] Сетевая ошибка через {proxy_url}: {type(exc).__name__}")
         finally:
             queue.task_done()
 
-async def main():
+
+async def main() -> None:
     input_path = Path(INPUT_FILE)
     if not input_path.exists():
-        input_path.write_text("")
-        print(f"Положи список прокси в {INPUT_FILE} и запусти снова.")
+        input_path.write_text("", encoding="utf-8")
+        print(f"Положи список HTTP-прокси в {INPUT_FILE} и запусти проверку снова.")
         return
 
-    with open(INPUT_FILE, "r", encoding="utf-8") as f:
-        proxies = [line.strip() for line in f if line.strip()]
-
+    proxies = [
+        line.strip()
+        for line in input_path.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
     if not proxies:
         print(f"Файл {INPUT_FILE} пуст.")
         return
 
-    print(f"Загружено прокси: {len(proxies)} шт.")
-    print("Ищем первый рабочий прокси и сразу останавливаемся...\n")
+    print(f"Загружено прокси: {len(proxies)}.")
+    print("Проверяю именно /vacancies, потому что /dictionaries может открываться даже при блокировке поиска.\n")
 
-    queue = asyncio.Queue()
-    for p in proxies:
-        queue.put_nowait(p)
+    queue: asyncio.Queue[str] = asyncio.Queue()
+    for proxy in proxies:
+        queue.put_nowait(proxy)
 
-    stop_event = asyncio.Event()
-    working_proxies = []
-    headers = {"User-Agent": "JobRadar/1.0 (admin@jobradar.ru)"}
-
-    async with aiohttp.ClientSession(headers=headers) as session:
-        # Запускаем фиксированное число воркеров (потоков проверки)
-        workers = [
-            asyncio.create_task(worker(queue, session, stop_event, working_proxies))
-            for _ in range(CONCURRENCY)
-        ]
-        
-        # Ждем, пока либо опустеет очередь, либо сработает stop_event
-        # gather сработает, когда воркеры выйдут из цикла while
+    working_proxies: list[str] = []
+    async with aiohttp.ClientSession(headers=HEADERS) as session:
+        workers = [asyncio.create_task(worker(queue, session, working_proxies)) for _ in range(CONCURRENCY)]
         await asyncio.gather(*workers)
 
     if working_proxies:
-        best_proxy = working_proxies[0]
-        with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
-            f.write(f"{best_proxy}\n")
-        print(f"\nГотово! Рабочий прокси '{best_proxy}' сохранен в {OUTPUT_FILE}.")
-        print("Скопируй его в свой .env файл: HH_PROXY=" + best_proxy)
+        Path(OUTPUT_FILE).write_text("\n".join(working_proxies) + "\n", encoding="utf-8")
+        print(f"\nГотово. Подходящих прокси: {len(working_proxies)}. Список сохранен в {OUTPUT_FILE}.")
+        print(f"Для запуска бота можно оставить HH_PROXY_FILE={OUTPUT_FILE} или указать первый прокси в HH_PROXY.")
     else:
-        print("\nНи одного подходящего прокси не найдено в списке :(")
+        print("\nПодходящих прокси не найдено. Нужен российский резидентный, мобильный или серверный IP, который HH не режет.")
+
 
 if __name__ == "__main__":
-    if sys.platform == 'win32':
+    if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     asyncio.run(main())

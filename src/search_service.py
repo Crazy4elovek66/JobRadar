@@ -48,10 +48,13 @@ class SearchService:
 
     async def _run(self, bot: Bot, user_id: int) -> SearchSummary:
         summary = SearchSummary()
-        vacancies = await self.hh_client.search_all()
+        ignored_external_ids = self.db.ignored_external_ids(source="hh")
+        vacancies = await self.hh_client.search_all(ignored_external_ids=ignored_external_ids)
         summary.found = len(vacancies)
 
         for vacancy in vacancies:
+            if vacancy.external_id in ignored_external_ids:
+                continue
             score = calculate_score(vacancy)
             row = self.db.upsert_vacancy(vacancy, score)
             summary.saved += 1

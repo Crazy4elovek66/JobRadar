@@ -1,55 +1,61 @@
+from __future__ import annotations
+
 import asyncio
-import aiohttp
 import sys
 
-async def check_single_proxy(proxy_url: str):
-    print(f"\n[~] Проверяем прокси: {proxy_url}")
-    print("[~] Подключение к api.hh.ru...\n")
-    
-    headers = {"User-Agent": "JobRadar/1.0 (admin@jobradar.ru)"}
-    
-    # Добавляем http:// если забыли
-    if not proxy_url.startswith("http") and not proxy_url.startswith("socks5"):
-        proxy_url = f"http://{proxy_url}"
-        
+import aiohttp
+
+
+TEST_URL = "https://api.hh.ru/vacancies?text=test&area=113&per_page=1"
+HEADERS = {
+    "User-Agent": "JobRadar/1.0 (contact: local)",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "ru-RU,ru;q=0.9",
+}
+
+
+def normalize_proxy(proxy_url: str) -> str:
+    proxy_url = proxy_url.strip()
+    if "://" in proxy_url:
+        return proxy_url
+    return f"http://{proxy_url}"
+
+
+async def check_single_proxy(proxy_url: str) -> None:
+    proxy_url = normalize_proxy(proxy_url)
+    print(f"\nПроверяю прокси для HH: {proxy_url}")
+
     try:
-        async with aiohttp.ClientSession(headers=headers) as session:
+        async with aiohttp.ClientSession(headers=HEADERS) as session:
             async with session.get(
-                "https://api.hh.ru/vacancies?text=test&per_page=1",
+                TEST_URL,
                 proxy=proxy_url,
-                timeout=aiohttp.ClientTimeout(total=10)
+                timeout=aiohttp.ClientTimeout(total=12),
             ) as response:
+                body = await response.text()
                 if response.status == 200:
-                    print("✅ УСПЕХ! Прокси ИДЕАЛЬНО работает и подходит для бота.")
+                    print("Успех: HH пропускает запросы к поиску вакансий через этот прокси.")
                 elif response.status == 403:
-                    print("❌ ОШИБКА 403 (Forbidden): Прокси рабочий, НО он заблокирован защитой HH.ru (DDOS-Guard).")
-                    print("👉 Решение: Этот прокси не подойдет, HH.ru банит этот IP. Нужен другой прокси (желательно мобильный или резидентный).")
+                    print("Ошибка 403: прокси технически отвечает, но HH блокирует этот маршрут.")
+                    print("Для проекта нужен другой российский IP: резидентный, мобильный или чистый серверный.")
                 else:
-                    print(f"⚠️ НЕИЗВЕСТНЫЙ ОТВЕТ: HTTP {response.status}")
-                    
-    except aiohttp.client_exceptions.ClientHttpProxyError as e:
-        if e.status == 301 or e.status == 302:
-            print("❌ ЭТО НЕ ПРОКСИ (Ошибка 301/302 Redirect).")
-            print("👉 Объяснение: Ты пытаешься использовать обычный сайт или открытый порт 80 как прокси. Это мусорный IP из бесплатной базы, он не умеет пропускать трафик.")
-        else:
-            print(f"❌ ОШИБКА ПРОКСИ: {e}")
-            
+                    print(f"Неожиданный ответ HTTP {response.status}.")
+                    print(body[:500])
+    except aiohttp.ClientHttpProxyError as exc:
+        print(f"Это не рабочий HTTP-прокси или прокси отказал в подключении: HTTP {exc.status}.")
     except asyncio.TimeoutError:
-        print("❌ ОШИБКА ТАЙМАУТА (TimeoutError).")
-        print("👉 Объяснение: Прокси мертв, недоступен или завис. Он не отвечает.")
-        
-    except Exception as e:
-        print(f"❌ СЕТЕВАЯ ОШИБКА: {type(e).__name__}")
-        print(f"👉 Детали: {e}")
+        print("Таймаут: прокси не ответил вовремя.")
+    except aiohttp.ClientError as exc:
+        print(f"Сетевая ошибка: {type(exc).__name__}: {exc}")
+
 
 if __name__ == "__main__":
-    if sys.platform == 'win32':
+    if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-        
-    print("=== ТЕСТ ОДНОГО ПРОКСИ ДЛЯ HH.RU ===")
-    proxy_input = input("Введи прокси (например, 12.34.56.78:8080 или http://log:pass@ip:port): ").strip()
-    
+
+    print("=== Проверка одного HTTP-прокси для HH.ru ===")
+    proxy_input = input("Введи прокси, например http://login:pass@ip:port или ip:port: ").strip()
     if proxy_input:
         asyncio.run(check_single_proxy(proxy_input))
     else:
-        print("Ты ничего не ввел.")
+        print("Прокси не указан.")

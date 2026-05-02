@@ -100,6 +100,19 @@ class Database:
         with closing(self.connect()) as connection, connection:
             connection.execute("UPDATE vacancies SET is_rejected_by_user = 1 WHERE id = ?", (vacancy_id,))
 
+    def ignored_external_ids(self, source: str = "hh") -> set[str]:
+        with closing(self.connect()) as connection:
+            rows = connection.execute(
+                """
+                SELECT external_id
+                FROM vacancies
+                WHERE source = ?
+                  AND (sent_at IS NOT NULL OR is_rejected_by_user = 1)
+                """,
+                (source,),
+            ).fetchall()
+        return {str(row["external_id"]) for row in rows}
+
     def stats(self) -> dict[str, int]:
         with closing(self.connect()) as connection, connection:
             total = connection.execute("SELECT COUNT(*) FROM vacancies").fetchone()[0]
