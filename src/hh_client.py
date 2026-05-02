@@ -46,11 +46,13 @@ class HHClient:
     def __init__(
         self,
         area: str,
+        host: str = "hh.ru",
         proxies: Iterable[str] = (),
         user_agent: str | None = None,
         access_token: str | None = None,
     ) -> None:
         self.area = area
+        self.host = host
         self.proxies = tuple(proxies)
         self.user_agent = user_agent or "JobRadar/1.0 (email@example.com)"
         self.access_token = access_token
@@ -82,7 +84,7 @@ class HHClient:
         try:
             await self._request_json(
                 self.API_URL,
-                params={"text": "test", "area": self.area, "per_page": 1},
+                params={"host": self.host, "text": "test", "area": self.area, "per_page": 1},
                 timeout=10,
             )
             return True
@@ -116,9 +118,11 @@ class HHClient:
         self._get_session()
         ignored_external_ids = ignored_external_ids or set()
         params = {
+            "host": self.host,
             "text": query,
             "area": self.area,
             "experience": "noExperience",
+            "schedule": "remote",
             "per_page": 50,
             "order_by": "publication_time",
         }
@@ -179,7 +183,6 @@ class HHClient:
                     params=params,
                     timeout=aiohttp.ClientTimeout(total=timeout),
                     proxy=proxy,
-                    headers=self.HTML_HEADERS,
                 ) as response:
                     if response.status == 403:
                         body = await response.text()
@@ -219,6 +222,7 @@ class HHClient:
             "text": query,
             "area": self.area,
             "experience": "noExperience",
+            "schedule": "remote",
             "items_on_page": self.HTML_ITEMS_PER_QUERY,
             "hhtmFrom": "vacancy_search_list",
         }

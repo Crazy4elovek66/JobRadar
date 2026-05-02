@@ -3,8 +3,9 @@ from __future__ import annotations
 import logging
 
 from aiogram import Bot, Dispatcher, F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, KeyboardButton, Message, ReplyKeyboardMarkup
 
 from src.config import Settings
 from src.database import Database
@@ -15,6 +16,11 @@ from src.utils import escape_html
 
 logger = logging.getLogger(__name__)
 router = Router()
+main_keyboard = ReplyKeyboardMarkup(
+    keyboard=[[KeyboardButton(text="🔎 Найти вакансии")]],
+    resize_keyboard=True,
+    is_persistent=True,
+)
 
 
 def build_dispatcher(settings: Settings, db: Database, search_service: SearchService) -> Dispatcher:
@@ -41,6 +47,7 @@ async def start_handler(message: Message, settings: Settings) -> None:
         "и присылаю только те варианты, которые могут помочь перейти в техническую среду.\n\n"
         "Команда /search запускает поиск вручную.",
         parse_mode="HTML",
+        reply_markup=main_keyboard,
     )
 
 
@@ -100,6 +107,11 @@ async def search_handler(message: Message, settings: Settings, search_service: S
     )
 
 
+@router.message(F.text == "🔎 Найти вакансии")
+async def search_button_handler(message: Message, settings: Settings, search_service: SearchService, bot: Bot) -> None:
+    await search_handler(message, settings, search_service, bot)
+
+
 @router.message(Command("stats"))
 async def stats_handler(message: Message, settings: Settings, db: Database) -> None:
     if not is_allowed_user(message, settings):
@@ -149,4 +161,9 @@ async def reject_handler(callback: CallbackQuery, settings: Settings, db: Databa
         return
     vacancy_id = int(callback.data.split(":", 1)[1])
     db.reject_by_user(vacancy_id)
+    if callback.message:
+        try:
+            await callback.message.delete()
+        except TelegramBadRequest:
+            logger.warning("Rejected vacancy message is already unavailable for deletion: %s", vacancy_id)
     await callback.answer("Больше не буду присылать эту вакансию.")

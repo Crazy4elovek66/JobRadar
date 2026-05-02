@@ -42,6 +42,7 @@ cp .env.example .env
 TELEGRAM_BOT_TOKEN=токен_от_BotFather
 TELEGRAM_USER_ID=ваш_telegram_id
 HH_AREA=113
+HH_HOST=hh.ru
 HH_USER_AGENT="JobRadar/1.0 (email@example.com)"
 HH_CLIENT_ID=""
 HH_CLIENT_SECRET=""
@@ -56,7 +57,7 @@ MIN_SCORE_TO_SEND=60
 DATABASE_PATH=data/jobradar.db
 ```
 
-`HH_AREA=113` означает Россию. Регион можно поменять на другой ID из справочника HH.ru.
+`HH_AREA=113` означает Россию. Регион можно поменять на другой ID из справочника HH.ru. `HH_HOST=hh.ru` выбирает сайт группы HeadHunter для API-запросов. Для поиска по России оставьте `HH_HOST=hh.ru`.
 
 Подробная инструкция по официальному подключению hh.ru API лежит в `docs/hh-api-setup.md`.
 
@@ -72,6 +73,12 @@ HH_PROXY=http://login:password@ru-proxy.example:8080
 
 ```bash
 python proxy_checker.py
+```
+
+Проверить API, User-Agent и токен можно командой:
+
+```bash
+python check_hh_api.py
 ```
 
 Если API HH блокирует поиск вакансий, но обычный сайт `hh.ru` открывается, JobRadar автоматически переключится на HTML-поиск. Это запасной режим для домашнего российского подключения: он медленнее API, но позволяет продолжать поиск без внешнего прокси.

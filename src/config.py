@@ -15,6 +15,7 @@ class Settings:
     telegram_bot_token: str
     telegram_user_id: int
     hh_area: str = "113"
+    hh_host: str = "hh.ru"
     hh_user_agent: str = "JobRadar/1.0 (email@example.com)"
     hh_client_id: str | None = None
     hh_client_secret: str | None = None
@@ -30,7 +31,7 @@ class Settings:
 
 
 def load_settings() -> Settings:
-    load_dotenv(BASE_DIR / ".env")
+    load_dotenv(BASE_DIR / ".env", override=True)
 
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     user_id_raw = os.getenv("TELEGRAM_USER_ID", "").strip()
@@ -61,6 +62,7 @@ def load_settings() -> Settings:
         telegram_bot_token=token,
         telegram_user_id=user_id,
         hh_area=os.getenv("HH_AREA", "113").strip() or "113",
+        hh_host=os.getenv("HH_HOST", "hh.ru").strip() or "hh.ru",
         hh_user_agent=os.getenv("HH_USER_AGENT", "JobRadar/1.0 (email@example.com)").strip()
         or "JobRadar/1.0 (email@example.com)",
         hh_client_id=os.getenv("HH_CLIENT_ID", "").strip() or None,

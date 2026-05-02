@@ -47,6 +47,8 @@ class SearchService:
             self._is_running = False
 
     async def _run(self, bot: Bot, user_id: int) -> SearchSummary:
+        MAX_VACANCIES_PER_RUN = 10
+
         summary = SearchSummary()
         ignored_external_ids = self.db.ignored_external_ids(source="hh")
         vacancies = await self.hh_client.search_all(ignored_external_ids=ignored_external_ids)
@@ -81,6 +83,8 @@ class SearchService:
 
             self.db.mark_sent(row["id"])
             summary.sent += 1
+            if summary.sent >= MAX_VACANCIES_PER_RUN:
+                break
 
         return summary
 

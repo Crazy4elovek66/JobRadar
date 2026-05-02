@@ -30,6 +30,7 @@ async def main() -> None:
     bot = Bot(token=settings.telegram_bot_token, session=session)
     hh_client = HHClient(
         area=settings.hh_area,
+        host=settings.hh_host,
         proxies=settings.hh_proxies,
         user_agent=settings.hh_user_agent,
         access_token=settings.hh_access_token,

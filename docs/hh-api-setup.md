@@ -51,6 +51,7 @@ https://your-project.vercel.app/auth/hh/callback
 Добавьте в `.env`:
 
 ```env
+HH_HOST=hh.ru
 HH_USER_AGENT="JobRadar/1.0 (email@example.com)"
 HH_CLIENT_ID=""
 HH_CLIENT_SECRET=""
@@ -62,6 +63,7 @@ HH_REDIRECT_URI="https://your-project.vercel.app/auth/hh/callback"
 
 Назначение переменных:
 
+- `HH_HOST` - сайт группы HeadHunter для API-запросов. Для России используйте `hh.ru`.
 - `HH_USER_AGENT` - обязательный User-Agent для запросов к hh.ru API.
 - `HH_CLIENT_ID` - идентификатор приложения из dev.hh.ru.
 - `HH_CLIENT_SECRET` - секрет приложения из dev.hh.ru.
@@ -81,11 +83,38 @@ JobRadar/1.0 (email@example.com)
 Публичный поиск вакансий можно проверить без OAuth-токена:
 
 ```bash
-curl -X GET "https://api.hh.ru/vacancies?text=python&area=113&per_page=5" \
+curl -X GET "https://api.hh.ru/vacancies?host=hh.ru&text=python&area=113&per_page=5" \
   -H "User-Agent: JobRadar/1.0 (email@example.com)"
 ```
 
 Ожидаемый результат - JSON со списком вакансий. Если приходит `400 bad_user_agent`, проверьте заголовок `User-Agent`. Если приходит `403 forbidden`, проверьте сеть, регион маршрута, прокси и ограничения со стороны hh.ru.
+
+В проекте также есть диагностический скрипт:
+
+```bash
+python check_hh_api.py
+```
+
+Он проверяет `GET /vacancies`, показывает ошибки HH в формате `type/value` и, если задан `HH_ACCESS_TOKEN`, проверяет токен через `GET /me`.
+
+## Выбор сайта через host
+
+По официальной OpenAPI-документации запросы ко всем сайтам группы HeadHunter отправляются на базовый адрес:
+
+```text
+https://api.hh.ru/
+```
+
+Если нужно указать сайт, используется параметр `host`. По умолчанию используется `hh.ru`.
+
+Для JobRadar в России рекомендуемая связка:
+
+```env
+HH_HOST=hh.ru
+HH_AREA=113
+```
+
+`HH_HOST` выбирает сайт группы HeadHunter, а `HH_AREA` ограничивает регион поиска. Параметр `host=hh.ru` не заменяет `area=113`.
 
 ## Получение токена приложения
 
@@ -141,10 +170,14 @@ HH_ACCESS_TOKEN="YOUR_ACCESS_TOKEN"
 
 - `400 bad_user_agent` - не передан User-Agent или он заблокирован. Нужно указать `HH_USER_AGENT`.
 - `400 bad_argument` - неверный параметр запроса, например неправильный `area` или `professional_role`.
-- `403 oauth` - токен отсутствует, истёк, отозван или не подходит для метода.
+- `403 oauth bad_authorization` - токен отсутствует или невалиден.
+- `403 oauth token_expired` - срок действия токена завершился.
+- `403 oauth token_revoked` - токен отозван пользователем.
+- `403 oauth user_auth_expected` - метод требует пользовательскую авторизацию, а передан токен приложения.
 - `403 forbidden` - доступ запрещён. В текущем проекте такое может встречаться на `GET /vacancies` из-за маршрута или защиты hh.ru.
 - `429` - слишком много запросов. Нужно снизить частоту и добавить паузу.
 - `500`, `502`, `503` - временная проблема сервиса. Нужно повторить позже с backoff.
+- `captcha_required` - операция требует прохождения капчи. JobRadar не должен обходить капчу автоматически.
 
 В JobRadar уже есть паузы между запросами и HTML fallback для случаев, когда API поиска вакансий отдаёт `403`, но обычный сайт hh.ru доступен.
 
@@ -188,4 +221,10 @@ python test_single_proxy.py
 
 ```bash
 python proxy_checker.py
+```
+
+Для диагностики API:
+
+```bash
+python check_hh_api.py
 ```
