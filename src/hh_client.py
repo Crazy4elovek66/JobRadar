@@ -5,7 +5,7 @@ import html
 import logging
 import random
 import re
-from collections.abc import Iterable
+from collections.abc import AsyncGenerator, Iterable
 from typing import Any
 from urllib.parse import urljoin
 
@@ -92,15 +92,16 @@ class HHClient:
             logger.warning("HH API ping failed")
             return False
 
-    async def search_all(self, ignored_external_ids: set[str] | None = None) -> list[Vacancy]:
+    async def search_all(self, ignored_external_ids: set[str] | None = None) -> AsyncGenerator[Vacancy, None]:
         self._get_session()
         ignored_external_ids = ignored_external_ids or set()
-        vacancies: dict[str, Vacancy] = {}
+        seen_external_ids: set[str] = set()
         queries = list(SEARCH_QUERIES)
         for index, query in enumerate(queries):
-            found: list[Vacancy] = []
             try:
-                found = await self.search(query, ignored_external_ids=ignored_external_ids | set(vacancies))
+                async for vacancy in self.search(query, ignored_external_ids=ignored_external_ids | seen_external_ids):
+                    seen_external_ids.add(vacancy.external_id)
+                    yield vacancy
             except HHAccessBlockedError:
                 logger.warning("HH API access blocked for all configured routes")
                 raise
@@ -108,13 +109,10 @@ class HHClient:
                 logger.exception("HH API request failed for query=%s", query)
             except asyncio.TimeoutError:
                 logger.warning("HH API timeout for query=%s", query)
-            for vacancy in found:
-                vacancies[vacancy.external_id] = vacancy
             if index < len(queries) - 1:
                 await asyncio.sleep(random.uniform(5.0, 10.0))
-        return list(vacancies.values())
 
-    async def search(self, query: str, ignored_external_ids: set[str] | None = None) -> list[Vacancy]:
+    async def search(self, query: str, ignored_external_ids: set[str] | None = None) -> AsyncGenerator[Vacancy, None]:
         self._get_session()
         ignored_external_ids = ignored_external_ids or set()
         params = {
@@ -134,19 +132,19 @@ class HHClient:
             )
         except HHAccessBlockedError:
             logger.warning("HH API blocked search query=%s, switching to HTML fallback", query)
-            return await self._search_html(query, ignored_external_ids=ignored_external_ids)
+            async for vacancy in self._search_html(query, ignored_external_ids=ignored_external_ids):
+                yield vacancy
+            return
 
         items = payload.get("items", [])
-        vacancies: list[Vacancy] = []
         for index, item in enumerate(items):
             external_id = str(item.get("id", ""))
             if external_id and external_id in ignored_external_ids:
                 continue
             detail = await self._fetch_detail(item.get("url"))
-            vacancies.append(self._parse_vacancy(item, detail))
+            yield self._parse_vacancy(item, detail)
             if index < len(items) - 1:
                 await asyncio.sleep(random.uniform(1.5, 3.5))
-        return vacancies
 
     async def _fetch_detail(self, url: str | None) -> dict[str, Any]:
         if not url:
@@ -217,7 +215,7 @@ class HHClient:
     def _mark_proxy_blocked(self, proxy: str | None) -> None:
         self._blocked_proxies.add(proxy)
 
-    async def _search_html(self, query: str, ignored_external_ids: set[str]) -> list[Vacancy]:
+    async def _search_html(self, query: str, ignored_external_ids: set[str]) -> AsyncGenerator[Vacancy, None]:
         params = {
             "text": query,
             "area": self.area,
@@ -227,20 +225,16 @@ class HHClient:
             "hhtmFrom": "vacancy_search_list",
         }
         search_html = await self._request_text(self.HTML_SEARCH_URL, params=params, timeout=20)
-        vacancy_ids = [
-            vacancy_id
-            for vacancy_id in self._extract_html_vacancy_ids(search_html)
-            if vacancy_id not in ignored_external_ids
-        ]
+        vacancy_ids = self._extract_html_vacancy_ids(search_html)
 
-        vacancies: list[Vacancy] = []
         for index, vacancy_id in enumerate(vacancy_ids):
+            if vacancy_id in ignored_external_ids:
+                continue
             vacancy = await self._fetch_html_vacancy(vacancy_id)
             if vacancy:
-                vacancies.append(vacancy)
+                yield vacancy
             if index < len(vacancy_ids) - 1:
                 await asyncio.sleep(random.uniform(1.0, 2.0))
-        return vacancies
 
     async def _fetch_html_vacancy(self, vacancy_id: str) -> Vacancy | None:
         url = self.HTML_VACANCY_URL.format(vacancy_id=vacancy_id)
