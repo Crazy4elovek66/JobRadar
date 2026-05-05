@@ -30,7 +30,7 @@ JobRadar использует hh.ru как основной источник в�
 5. `src/bot.py` отправляет подходящие вакансии в Telegram.
 6. `src/scheduler.py` запускает периодический поиск через APScheduler.
 
-Для MVP можно использовать публичный поиск вакансий через `GET /vacancies` без токена. Для официального режима с приложением нужно зарегистрировать приложение в dev.hh.ru.
+Публичный поиск вакансий работает через `GET /vacancies` без токена. Отклики, список резюме и `/me` требуют OAuth-авторизацию пользователя.
 
 ## Регистрация приложения
 
@@ -52,11 +52,17 @@ https://your-project.vercel.app/auth/hh/callback
 
 ```env
 HH_HOST=hh.ru
-HH_USER_AGENT="JobRadar/1.0 (email@example.com)"
-HH_CLIENT_ID=""
-HH_CLIENT_SECRET=""
-HH_ACCESS_TOKEN=""
-HH_REDIRECT_URI="https://your-project.vercel.app/auth/hh/callback"
+HH_USER_AGENT="JobRadar/0.1 (apalladiumtv@gmail.com)"
+HH_API_BASE=https://api.hh.ru
+HH_OAUTH_AUTHORIZE_URL=https://hh.ru/oauth/authorize
+HH_TOKEN_URL=https://api.hh.ru/token
+HH_CLIENT_ID=
+HH_CLIENT_SECRET=
+HH_REDIRECT_URI=https://job-radar-ashen.vercel.app/auth/hh/callback
+HH_TOKEN_ENCRYPTION_KEY=
+HH_AUTO_WORKER_SECRET=
+APP_BASE_URL=https://job-radar-ashen.vercel.app
+OAUTH_STATE_SECRET=
 ```
 
 Безопасный пример уже добавлен в `.env.example`.
@@ -67,13 +73,15 @@ HH_REDIRECT_URI="https://your-project.vercel.app/auth/hh/callback"
 - `HH_USER_AGENT` - обязательный User-Agent для запросов к hh.ru API.
 - `HH_CLIENT_ID` - идентификатор приложения из dev.hh.ru.
 - `HH_CLIENT_SECRET` - секрет приложения из dev.hh.ru.
-- `HH_ACCESS_TOKEN` - токен приложения или пользователя, если используется авторизация.
 - `HH_REDIRECT_URI` - callback URL для OAuth-проверки.
+- `HH_TOKEN_ENCRYPTION_KEY` - AES-ключ для шифрования access token и refresh token в SQLite.
+- `HH_AUTO_WORKER_SECRET` - секрет cron endpoint.
+- `APP_BASE_URL` - публичный URL JobRadar для ссылок OAuth.
 
 Рекомендуемый User-Agent:
 
 ```text
-JobRadar/1.0 (email@example.com)
+JobRadar/0.1 (apalladiumtv@gmail.com)
 ```
 
 Замените `email@example.com` на контакт владельца проекта перед регистрацией приложения. В публичном коде оставляйте только безопасный пример.
@@ -95,7 +103,7 @@ curl -X GET "https://api.hh.ru/vacancies?host=hh.ru&text=python&area=113&per_pag
 python check_hh_api.py
 ```
 
-Он проверяет `GET /vacancies`, показывает ошибки HH в формате `type/value` и, если задан `HH_ACCESS_TOKEN`, проверяет токен через `GET /me`.
+Он проверяет `GET /vacancies` и показывает ошибки HH в формате `type/value`. OAuth-токены теперь сохраняются ботом в SQLite только в зашифрованном виде.
 
 ## Выбор сайта через host
 
@@ -116,25 +124,15 @@ HH_AREA=113
 
 `HH_HOST` выбирает сайт группы HeadHunter, а `HH_AREA` ограничивает регион поиска. Параметр `host=hh.ru` не заменяет `area=113`.
 
-## Получение токена приложения
+## OAuth-подключение
 
-После регистрации приложения можно запросить токен приложения:
+1. Запустите `python main.py`.
+2. В Telegram откройте «🔗 HH подключение».
+3. Нажмите «🔗 Подключить HH».
+4. Откройте ссылку авторизации и подтвердите доступ.
+5. После возврата на `/auth/hh/callback` JobRadar обменяет `code` на токены, проверит `/me`, зашифрует токены и отправит уведомление в Telegram.
 
-```bash
-curl -X POST "https://api.hh.ru/token" \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "grant_type=client_credentials" \
-  -d "client_id=YOUR_CLIENT_ID" \
-  -d "client_secret=YOUR_CLIENT_SECRET"
-```
-
-Полученный `access_token` можно временно добавить в `.env`:
-
-```env
-HH_ACCESS_TOKEN="YOUR_ACCESS_TOKEN"
-```
-
-Не коммитьте токены, `client_secret` и личные email в репозиторий.
+Не коммитьте секрет клиента, токены, refresh token и ключ шифрования.
 
 ## Методы API, которые нужны JobRadar
 
@@ -179,21 +177,15 @@ HH_ACCESS_TOKEN="YOUR_ACCESS_TOKEN"
 - `500`, `502`, `503` - временная проблема сервиса. Нужно повторить позже с backoff.
 - `captcha_required` - операция требует прохождения капчи. JobRadar не должен обходить капчу автоматически.
 
-В JobRadar уже есть паузы между запросами и HTML fallback для случаев, когда API поиска вакансий отдаёт `403`, но обычный сайт hh.ru доступен.
+В JobRadar есть паузы между запросами, но нет HTML-парсинга. Если официальный API возвращает запрет или временную ошибку, бот не обходит ограничение через страницы сайта.
 
-## Почему автоматические отклики пока не нужны
+## Отклики и автоотклики
 
-Автоматические отклики не входят в MVP.
+Режим «по кнопке» включён по умолчанию: JobRadar показывает предпросмотр письма и отправляет реальный отклик только после финального подтверждения.
 
-Причины:
+Полуавто складывает сильные вакансии в очередь, а пользователь выбирает, какие отклики отправлять.
 
-- для откликов нужна авторизация пользователя hh.ru;
-- могут быть обязательные тесты работодателя;
-- возможны капча, лимиты и дополнительные ошибки;
-- неправильные автоотклики могут ухудшить качество поиска работы;
-- текущая цель JobRadar - найти, отфильтровать и показать подходящие вакансии владельцу.
-
-Решение об отклике должен принимать владелец проекта вручную.
+Автоотклики выключены по умолчанию и включаются только после предупреждения о риске. Для авто действует дневной лимит, лимит за запуск, случайная задержка, журнал действий и стоп при серьёзных ошибках HH.
 
 ## Безопасность
 

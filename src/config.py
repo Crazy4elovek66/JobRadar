@@ -19,8 +19,16 @@ class Settings:
     hh_user_agent: str = "JobRadar/1.0 (email@example.com)"
     hh_client_id: str | None = None
     hh_client_secret: str | None = None
-    hh_access_token: str | None = None
     hh_redirect_uri: str | None = None
+    hh_api_base: str = "https://api.hh.ru"
+    hh_oauth_authorize_url: str = "https://hh.ru/oauth/authorize"
+    hh_token_url: str = "https://api.hh.ru/token"
+    hh_token_encryption_key: str | None = None
+    hh_auto_worker_secret: str | None = None
+    app_base_url: str = "http://localhost:8080"
+    oauth_state_secret: str | None = None
+    web_server_host: str = "0.0.0.0"
+    web_server_port: int = 8080
     hh_proxy: str | None = None
     hh_proxies: tuple[str, ...] = ()
     hh_proxy_file: Path = BASE_DIR / "good_proxies.txt"
@@ -63,12 +71,21 @@ def load_settings() -> Settings:
         telegram_user_id=user_id,
         hh_area=os.getenv("HH_AREA", "113").strip() or "113",
         hh_host=os.getenv("HH_HOST", "hh.ru").strip() or "hh.ru",
-        hh_user_agent=os.getenv("HH_USER_AGENT", "JobRadar/1.0 (email@example.com)").strip()
-        or "JobRadar/1.0 (email@example.com)",
+        hh_user_agent=os.getenv("HH_USER_AGENT", "JobRadar/0.1 (email@example.com)").strip()
+        or "JobRadar/0.1 (email@example.com)",
         hh_client_id=os.getenv("HH_CLIENT_ID", "").strip() or None,
         hh_client_secret=os.getenv("HH_CLIENT_SECRET", "").strip() or None,
-        hh_access_token=os.getenv("HH_ACCESS_TOKEN", "").strip() or None,
         hh_redirect_uri=os.getenv("HH_REDIRECT_URI", "").strip() or None,
+        hh_api_base=os.getenv("HH_API_BASE", "https://api.hh.ru").strip().rstrip("/") or "https://api.hh.ru",
+        hh_oauth_authorize_url=os.getenv("HH_OAUTH_AUTHORIZE_URL", "https://hh.ru/oauth/authorize").strip()
+        or "https://hh.ru/oauth/authorize",
+        hh_token_url=os.getenv("HH_TOKEN_URL", "https://api.hh.ru/token").strip() or "https://api.hh.ru/token",
+        hh_token_encryption_key=os.getenv("HH_TOKEN_ENCRYPTION_KEY", "").strip() or None,
+        hh_auto_worker_secret=os.getenv("HH_AUTO_WORKER_SECRET", "").strip() or None,
+        app_base_url=os.getenv("APP_BASE_URL", "http://localhost:8080").strip().rstrip("/") or "http://localhost:8080",
+        oauth_state_secret=os.getenv("OAUTH_STATE_SECRET", "").strip() or os.getenv("HH_AUTO_WORKER_SECRET", "").strip() or None,
+        web_server_host=os.getenv("WEB_SERVER_HOST", "0.0.0.0").strip() or "0.0.0.0",
+        web_server_port=int(os.getenv("WEB_SERVER_PORT", "8080")),
         hh_proxy=hh_proxy,
         hh_proxies=hh_proxies,
         hh_proxy_file=hh_proxy_file,
