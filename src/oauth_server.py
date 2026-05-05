@@ -27,11 +27,16 @@ def create_web_app(settings: Settings, db: Database, hh_client: HHClient, bot: B
     app["hh_client"] = hh_client
     app["bot"] = bot
     app["search_service"] = search_service
+    app.router.add_get("/", root)
     app.router.add_get("/auth/hh/start", hh_start)
     app.router.add_get("/auth/hh/callback", hh_callback)
     app.router.add_get("/api/cron/search", cron_search)
     app.router.add_get("/cron/search", cron_search)
     return app
+
+
+async def root(request: web.Request) -> web.Response:
+    return html_page("Бэкенд JobRadar запущен", "Для авторизации перейдите в бота.")
 
 
 async def hh_start(request: web.Request) -> web.Response:
@@ -62,7 +67,17 @@ async def hh_callback(request: web.Request) -> web.Response:
         me = await hh_client.save_oauth_tokens(telegram_user_id, token_payload)
         db.update_user_settings(telegram_user_id, hh_connected=1)
         await bot.send_message(telegram_user_id, "HH успешно подключен. Теперь можно выбрать резюме и запускать отклики.")
-        return html_page("HH подключен", f"Аккаунт HH подключен к JobRadar. Можно вернуться в Telegram.")
+        try:
+            bot_info = await bot.get_me()
+            redirect_url = f"tg://resolve?domain={bot_info.username}" if bot_info.username else None
+        except Exception:
+            logger.exception("Telegram bot info lookup failed after HH OAuth callback")
+            redirect_url = None
+        return html_page(
+            "HH успешно подключен",
+            "Ваш аккаунт HeadHunter привязан к JobRadar. Сейчас мы вернём вас в Telegram...",
+            redirect_url=redirect_url,
+        )
     except Exception:
         logger.exception("HH OAuth callback failed")
         return html_page("HH не подключен", "Не удалось завершить авторизацию. Проверь настройки приложения HH и попробуй ещё раз.")
@@ -120,17 +135,25 @@ def verify_state(settings: Settings, state: str) -> dict[str, int]:
     return payload
 
 
-def html_page(title: str, text: str) -> web.Response:
+def html_page(title: str, text: str, redirect_url: str | None = None) -> web.Response:
     safe_title = title.replace("<", "&lt;").replace(">", "&gt;")
     safe_text = text.replace("<", "&lt;").replace(">", "&gt;")
+    redirect_button = ""
+    redirect_script = ""
+    if redirect_url:
+        safe_redirect_url = redirect_url.replace("&", "&amp;").replace("\"", "&quot;").replace("<", "&lt;").replace(">", "&gt;")
+        redirect_button = f"<a class=\"button\" href=\"{safe_redirect_url}\">Вернуться в Telegram</a>"
+        redirect_script = f"<script>setTimeout(() => window.location.href = {json.dumps(redirect_url)}, 2000);</script>"
     return web.Response(
         text=(
             "<!doctype html><html lang=\"ru\"><head><meta charset=\"utf-8\">"
             "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
             f"<title>{safe_title}</title>"
             "<style>body{margin:0;font-family:Inter,Arial,sans-serif;background:#0f172a;color:#f8fafc;display:grid;min-height:100vh;place-items:center}"
-            "main{max-width:640px;padding:32px}h1{font-size:34px;margin:0 0 14px}p{font-size:18px;line-height:1.55;color:#cbd5e1}</style>"
-            f"</head><body><main><h1>{safe_title}</h1><p>{safe_text}</p></main></body></html>"
+            "main{max-width:640px;padding:32px}h1{font-size:34px;margin:0 0 14px}p{font-size:18px;line-height:1.55;color:#cbd5e1}"
+            ".button{display:inline-flex;align-items:center;justify-content:center;margin-top:18px;padding:13px 22px;border-radius:12px;background:#2563eb;color:#fff;text-decoration:none;font-weight:700;box-shadow:0 16px 36px rgba(37,99,235,.28)}"
+            ".button:hover{background:#1d4ed8}</style>"
+            f"</head><body><main><h1>{safe_title}</h1><p>{safe_text}</p>{redirect_button}</main>{redirect_script}</body></html>"
         ),
         content_type="text/html",
     )
