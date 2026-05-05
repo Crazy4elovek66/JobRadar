@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useEffect } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
 
@@ -155,19 +155,29 @@ function TermsPage() {
 }
 
 function CallbackPage() {
-  const params = new URLSearchParams(window.location.search);
-  const code = params.get("code");
-  const error = params.get("error");
+  const search = window.location.search;
+
+  useEffect(() => {
+    if (!search) {
+      return;
+    }
+
+    const redirectTimer = window.setTimeout(() => {
+      window.location.href = `http://127.0.0.1:8080/auth/hh/callback${search}`;
+    }, 1500);
+
+    return () => window.clearTimeout(redirectTimer);
+  }, [search]);
 
   return (
     <Shell>
       <main className="document callback">
-        <h1>Авторизация hh.ru завершена</h1>
-        <p>Этот экран используется для технической проверки OAuth-подключения JobRadar.</p>
-        {code ? <p className="stateOk">Код авторизации получен. Серверная обработка будет добавлена позже.</p> : null}
-        {error ? <p className="stateError">hh.ru вернул ошибку авторизации: {error}</p> : null}
-        {!code && !error ? <p className="muted">В URL нет параметров `code` или `error`.</p> : null}
-        {/* TODO: обменивать code на токен только на сервере, без сохранения секретов в браузере. */}
+        <h1>Перенаправление...</h1>
+        {search ? (
+          <p>Передаём данные авторизации в локальное приложение JobRadar. Пожалуйста, подождите пару секунд.</p>
+        ) : (
+          <p className="stateError">Ошибка маршрутизации. Нет данных для передачи в локальное приложение.</p>
+        )}
       </main>
     </Shell>
   );
