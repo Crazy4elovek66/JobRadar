@@ -10,6 +10,7 @@ from aiogram.client.session.aiohttp import AiohttpSession
 from src.bot import build_dispatcher
 from src.config import Settings, load_settings
 from src.database import Database
+from src.db_migrations import migrate_database
 from src.apply_service import ApplyService
 from src.hh_client import HHClient
 from src.oauth_server import create_web_app
@@ -57,6 +58,7 @@ async def main() -> None:
     warn_if_local_oauth_route_is_cloud(settings)
     db = Database(settings.database_path)
     db.init()
+    migrate_database(db)
 
     session = AiohttpSession(proxy=settings.telegram_proxy)
     bot = Bot(token=settings.telegram_bot_token, session=session)
