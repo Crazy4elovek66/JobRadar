@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from urllib.parse import urlencode
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.exceptions import TelegramBadRequest
@@ -97,9 +96,19 @@ async def search_handler(message: Message, settings: Settings, search_service: S
     if search_service.is_running:
         await message.answer("Поиск уже выполняется. Подожди завершения.", parse_mode="HTML")
         return
-    await message.answer("Запускаю поиск по официальному HH API. Пришлю сильные варианты по готовности.", parse_mode="HTML")
+    await message.answer("Запускаю поиск по страницам HH. Пришлю сильные варианты по готовности.", parse_mode="HTML")
     try:
         summary = await search_service.run(bot, settings.telegram_user_id)
+    except HHApiError as exc:
+        logger.warning(
+            "Manual search stopped by HH HTML: status=%s type=%s value=%s request_id=%s",
+            exc.status,
+            exc.error_type,
+            exc.error_value,
+            hh_request_id(exc),
+        )
+        await message.answer(format_hh_api_error("Поиск вакансий на HH сейчас не прошёл.", exc), parse_mode="HTML")
+        return
     except Exception:
         logger.exception("Manual search failed")
         await message.answer("Поиск сейчас не получился: HH или сеть временно недоступны. Попробуй позже.", parse_mode="HTML")
@@ -114,7 +123,8 @@ async def search_handler(message: Message, settings: Settings, search_service: S
         f"Отсеяно: {summary.rejected}\n"
         f"Показано: {summary.sent}\n"
         f"В очереди: {summary.queued}\n"
-        f"Автооткликов поставлено в очередь: {summary.auto_applied}",
+        f"Автооткликов поставлено в очередь: {summary.auto_applied}\n"
+        f"Уже откликался на HH: {summary.external_applied}",
         parse_mode="HTML",
     )
 
@@ -137,6 +147,15 @@ async def hh_handler(message: Message, settings: Settings, db: Database) -> None
     await message.answer(format_hh_status(user_settings, settings), parse_mode="HTML", reply_markup=hh_keyboard(bool(user_settings["hh_connected"])))
 
 
+@router.message(Command("hh_diag"))
+async def hh_diag_handler(message: Message, settings: Settings, db: Database, hh_client: HHClient) -> None:
+    if not is_allowed_user(message, settings):
+        return
+    await message.answer("Проверяю HTML-маршрут до HH: поиск, личную страницу и список резюме.", parse_mode="HTML")
+    report = await build_hh_diag_report(settings, db, hh_client)
+    await message.answer(report, parse_mode="HTML")
+
+
 @router.message(Command("stats"))
 @router.message(F.text == "📊 Статистика")
 async def stats_handler(message: Message, settings: Settings, db: Database) -> None:
@@ -155,6 +174,7 @@ async def stats_handler(message: Message, settings: Settings, db: Database) -> N
         f"Ручных откликов: {today['manual']}\n"
         f"Полуавтооткликов: {today['semi_auto']}\n"
         f"Автооткликов: {today['auto']}\n"
+        f"Внешних откликов с HH: {today['external']}\n"
         f"Ошибок: {today['errors']}\n"
         f"Остаток автооткликов на сегодня: {remaining_auto}\n"
         f"Последний запуск поиска: {escape_html(user_settings['last_search_at'] or 'ещё не запускался')}\n"
@@ -305,17 +325,34 @@ async def hh_callback(callback: CallbackQuery, settings: Settings, db: Database,
         return
     action = callback.data.split(":", 1)[1]
     if action == "connect":
-        url = f"{settings.app_base_url}/auth/hh/start?{urlencode({'telegramUserId': settings.telegram_user_id})}"
-        await callback.message.answer(f"Открой ссылку для подключения HH:\n{escape_html(url)}", parse_mode="HTML")
+        try:
+            await hh_client.get_me(settings.telegram_user_id)
+            db.mark_hh_connected(settings.telegram_user_id, True)
+            await callback.message.answer("HH подключен через сессионные cookie. Теперь можно выбрать резюме для откликов.", parse_mode="HTML")
+        except HHApiError as exc:
+            db.mark_hh_connected(settings.telegram_user_id, False)
+            await callback.message.answer(format_hh_api_error("HH не подключился через cookie.", exc), parse_mode="HTML")
+        except Exception as exc:
+            db.mark_hh_connected(settings.telegram_user_id, False)
+            await callback.message.answer(f"HH не подключился через cookie: {escape_html(str(exc))}", parse_mode="HTML")
     elif action == "check":
         try:
-            me = await hh_client.get_me(settings.telegram_user_id)
-            await callback.message.answer(f"HH подключен. Тип аккаунта: {escape_html(me.get('user_type') or 'не указан')}.", parse_mode="HTML")
+            await hh_client.get_me(settings.telegram_user_id)
+            db.mark_hh_connected(settings.telegram_user_id, True)
+            await callback.message.answer("HH отвечает как авторизованная сессия. Cookie рабочие.", parse_mode="HTML")
+        except HHApiError as exc:
+            db.mark_hh_connected(settings.telegram_user_id, False)
+            await callback.message.answer(format_hh_api_error("HH не проверился.", exc), parse_mode="HTML")
         except Exception as exc:
+            db.mark_hh_connected(settings.telegram_user_id, False)
             await callback.message.answer(f"HH не проверился: {escape_html(str(exc))}", parse_mode="HTML")
+    elif action == "diag":
+        await callback.message.answer("Проверяю HTML-маршрут до HH: поиск, личную страницу и список резюме.", parse_mode="HTML")
+        report = await build_hh_diag_report(settings, db, hh_client)
+        await callback.message.answer(report, parse_mode="HTML")
     elif action == "disconnect":
-        db.delete_hh_tokens(settings.telegram_user_id)
-        await callback.message.answer("HH отключен. Токены удалены из локального хранилища.")
+        db.disconnect_hh(settings.telegram_user_id)
+        await callback.message.answer("HH отключен в настройках JobRadar. Cookie остаются только в .env; при необходимости очисти HH_SESSION_COOKIE вручную.")
     elif action == "resumes":
         await show_resumes(callback, settings, hh_client)
     await callback.answer()
@@ -324,6 +361,9 @@ async def hh_callback(callback: CallbackQuery, settings: Settings, db: Database,
 async def show_resumes(callback: CallbackQuery, settings: Settings, hh_client: HHClient) -> None:
     try:
         resumes = await hh_client.get_my_resumes(settings.telegram_user_id)
+    except HHApiError as exc:
+        await callback.message.answer(format_hh_api_error("Не удалось получить резюме HH.", exc), parse_mode="HTML")
+        return
     except Exception as exc:
         await callback.message.answer(f"Не удалось получить резюме HH: {escape_html(str(exc))}", parse_mode="HTML")
         return
@@ -345,7 +385,16 @@ async def resume_selected_callback(callback: CallbackQuery, settings: Settings, 
         await callback.answer("Кнопка доступна только владельцу JobRadar.", show_alert=True)
         return
     resume_id = callback.data.split(":", 1)[1]
-    resumes = await hh_client.get_my_resumes(settings.telegram_user_id)
+    try:
+        resumes = await hh_client.get_my_resumes(settings.telegram_user_id)
+    except HHApiError as exc:
+        await callback.message.answer(format_hh_api_error("Не удалось повторно проверить список резюме HH.", exc), parse_mode="HTML")
+        await callback.answer()
+        return
+    except Exception as exc:
+        await callback.message.answer(f"Не удалось повторно проверить список резюме HH: {escape_html(str(exc))}", parse_mode="HTML")
+        await callback.answer()
+        return
     resume = next((item for item in resumes if str(item.get("id")) == resume_id), None)
     title = (resume or {}).get("title") or "Резюме HH"
     db.update_user_settings(settings.telegram_user_id, selected_resume_id=resume_id, selected_resume_title=title)
@@ -534,12 +583,86 @@ async def hide_employer_handler(callback: CallbackQuery, settings: Settings, db:
 def format_hh_status(user_settings, settings: Settings) -> str:
     status = "подключен" if user_settings["hh_connected"] else "не подключен"
     resume = user_settings["selected_resume_title"] or "не выбрано"
+    cookie_status = "заданы" if settings.hh_session_cookie else "не заданы"
     return (
         "HH подключение:\n\n"
         f"Статус: <b>{status}</b>\n"
+        f"Cookie в .env: <b>{cookie_status}</b>\n"
         f"Резюме для откликов: <b>{escape_html(resume)}</b>\n\n"
-        "Секреты приложения здесь не меняются: идентификатор клиента, секрет клиента, адрес возврата и ключ шифрования хранятся только в переменных окружения."
+        "JobRadar читает HH_SESSION_COOKIE из .env и открывает страницы HH как обычный браузер. Если HH перестал пускать в резюме, обнови cookie и нажми «Проверить подключение»."
     )
+
+
+def format_hh_api_error(title: str, error: HHApiError) -> str:
+    error_type = error.error_type or "не указан"
+    error_value = error.error_value or "не указано"
+    status = error.status if error.status is not None else "нет"
+    recommendation = HHClient.explain_error(error.error_value or error.error_type or str(error.status or ""))
+    lines = [
+        escape_html(title),
+        "",
+        f"Статус страницы: <b>{escape_html(str(status))}</b>",
+        f"Тип ошибки: <b>{escape_html(error_type)}</b>",
+        f"Код ошибки: <b>{escape_html(error_value)}</b>",
+        f"Маршрут: <b>{escape_html(HHClient._proxy_label(error.proxy))}</b>",
+    ]
+    request_id = hh_request_id(error)
+    if request_id:
+        lines.append(f"Идентификатор запроса: <code>{escape_html(request_id)}</code>")
+    lines.extend(["", escape_html(recommendation)])
+    if error.status == 403 and error.error_type == "forbidden":
+        lines.extend(
+            [
+                "",
+                "HH отвечает 403 forbidden на HTML-страницу. Это не ошибка кнопки резюме: обнови cookie, проверь VPN/прокси и повтори диагностику.",
+            ]
+        )
+    return "\n".join(lines)
+
+
+def hh_request_id(error: HHApiError) -> str | None:
+    for key in ("X-Request-Id", "X-Request-ID", "x-request-id"):
+        if value := error.response_headers.get(key):
+            return value
+    if isinstance(error.raw_payload, dict):
+        request_id = error.raw_payload.get("request_id")
+        return str(request_id) if request_id else None
+    return None
+
+
+async def build_hh_diag_report(settings: Settings, db: Database, hh_client: HHClient) -> str:
+    lines = [
+        "Диагностика HH HTML:",
+        "",
+        f"HH_HOST: <b>{escape_html(settings.hh_host)}</b>",
+        f"HH_USER_AGENT: <b>{escape_html(settings.hh_user_agent)}</b>",
+        f"HH_SESSION_COOKIE: <b>{'задан' if settings.hh_session_cookie else 'не задан'}</b>",
+        f"HH_PROXY_MODE: <b>{escape_html(settings.hh_proxy_mode)}</b>",
+        f"Маршруты: <b>{'direct/proxy' if settings.hh_proxies else 'direct'}</b>",
+        f"Прокси HH: <b>{'заданы' if settings.hh_proxies else 'не заданы'}</b>",
+        "",
+    ]
+    lines.append(await _diag_step(hh_client, "GET /search/vacancy", hh_client.search_vacancies(None, {"host": "hh.ru", "text": "python", "area": "113", "per_page": 1})))
+    lines.append(await _diag_step(hh_client, "GET /applicant/resumes", hh_client.get_my_resumes(settings.telegram_user_id)))
+    return "\n".join(lines)
+
+
+async def _diag_step(hh_client: HHClient, title: str, awaitable) -> str:
+    try:
+        await awaitable
+        return f"ОК {escape_html(title)}: страница открылась, маршрут={escape_html(HHClient._proxy_label(hh_client.last_request_proxy))}."
+    except HHApiError as exc:
+        status = exc.status if exc.status is not None else "нет"
+        error_type = exc.error_type or "не указан"
+        error_value = exc.error_value or "не указано"
+        explanation = HHClient.explain_error(exc.error_value or exc.error_type or str(exc.status or ""))
+        return (
+            f"СБОЙ {escape_html(title)}: статус {escape_html(str(status))}, "
+            f"тип={escape_html(error_type)}, код={escape_html(error_value)}, "
+            f"маршрут={escape_html(HHClient._proxy_label(exc.proxy))}. {escape_html(explanation)}"
+        )
+    except Exception as exc:
+        return f"СБОЙ {escape_html(title)}: {escape_html(str(exc))}"
 
 
 def format_settings(row) -> str:
@@ -571,6 +694,7 @@ def apply_mode_label(value: str | None) -> str:
         "semi_auto": "полуавто",
         "auto": "авто",
         "manual": "по кнопке",
+        "external": "уже был на HH",
     }.get(value or "", "не задан")
 
 

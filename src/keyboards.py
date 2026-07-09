@@ -35,7 +35,7 @@ def vacancy_keyboard(row_id: int, vacancy_external_id: str, url: str) -> InlineK
 
 
 def settings_keyboard(hh_connected: bool) -> InlineKeyboardMarkup:
-    connect_text = "🔄 Переподключить HH" if hh_connected else "🔗 Подключить HH"
+    connect_text = "🔄 Проверить cookie HH" if hh_connected else "🔗 Подключить HH по cookie"
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text=connect_text, callback_data="hh:connect")],
@@ -92,9 +92,10 @@ def apply_confirm_keyboard(vacancy_id: str) -> InlineKeyboardMarkup:
 def hh_keyboard(hh_connected: bool) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🔗 Подключить HH", callback_data="hh:connect")],
-            [InlineKeyboardButton(text="🔄 Переподключить HH", callback_data="hh:connect")],
+            [InlineKeyboardButton(text="🔗 Подключить HH по cookie", callback_data="hh:connect")],
+            [InlineKeyboardButton(text="🔄 Обновить проверку cookie", callback_data="hh:connect")],
             [InlineKeyboardButton(text="✅ Проверить подключение", callback_data="hh:check")],
+            [InlineKeyboardButton(text="🩺 Диагностика HH", callback_data="hh:diag")],
             [InlineKeyboardButton(text="🧾 Выбрать резюме", callback_data="hh:resumes")],
             [InlineKeyboardButton(text="❌ Отключить HH", callback_data="hh:disconnect")],
         ]

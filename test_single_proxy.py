@@ -6,10 +6,10 @@ import sys
 import aiohttp
 
 
-TEST_URL = "https://api.hh.ru/vacancies?text=test&area=113&per_page=1"
+TEST_URL = "https://hh.ru/search/vacancy?text=test&area=113&per_page=1"
 HEADERS = {
-    "User-Agent": "JobRadar/1.0 (contact: local)",
-    "Accept": "application/json, text/plain, */*",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "ru-RU,ru;q=0.9",
 }
 

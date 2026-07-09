@@ -6,6 +6,7 @@ from aiogram import Bot
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from src.config import Settings
+from src.hh_client import HHApiError
 from src.search_service import SearchService
 
 
@@ -19,6 +20,14 @@ def create_scheduler(bot: Bot, settings: Settings, search_service: SearchService
         logger.info("Scheduled vacancy search started")
         try:
             summary = await search_service.run(bot, settings.telegram_user_id)
+        except HHApiError as exc:
+            logger.warning(
+                "Scheduled vacancy search stopped by HH HTML: status=%s type=%s value=%s",
+                exc.status,
+                exc.error_type,
+                exc.error_value,
+            )
+            return
         except Exception:
             logger.exception("Scheduled vacancy search failed")
             return
@@ -26,11 +35,12 @@ def create_scheduler(bot: Bot, settings: Settings, search_service: SearchService
             logger.warning("Scheduled search skipped because another search is already running")
             return
         logger.info(
-            "Scheduled vacancy search finished: found=%s saved=%s rejected=%s sent=%s",
+            "Scheduled vacancy search finished: found=%s saved=%s rejected=%s sent=%s external_applied=%s",
             summary.found,
             summary.saved,
             summary.rejected,
             summary.sent,
+            summary.external_applied,
         )
         await process_auto_queue()
 

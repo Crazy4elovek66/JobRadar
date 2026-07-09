@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from urllib.parse import urlparse
 
 from aiogram import Bot
 from aiogram.client.session.aiohttp import AiohttpSession
@@ -11,7 +10,7 @@ from src.bot import build_dispatcher
 from src.config import Settings, load_settings
 from src.database import Database
 from src.apply_service import ApplyService
-from src.hh_client import HHClient
+from src.hh_client import HHApiError, HHClient
 from src.oauth_server import create_web_app
 from src.scheduler import create_scheduler
 from src.search_service import SearchService
@@ -21,31 +20,68 @@ from aiohttp import web
 logger = logging.getLogger(__name__)
 
 
-def warn_if_local_oauth_route_is_cloud(settings: Settings) -> None:
-    app_base_host = (urlparse(settings.app_base_url).hostname or "").lower()
-    web_host = settings.web_server_host.strip().lower()
-    local_web_hosts = {"", "0.0.0.0", "::", "localhost", "127.0.0.1", "::1"}
-    cloud_suffixes = (
-        ".vercel.app",
-        ".netlify.app",
-        ".render.com",
-        ".fly.dev",
-        ".railway.app",
-    )
-    is_cloud_app_base = any(app_base_host == suffix.lstrip(".") or app_base_host.endswith(suffix) for suffix in cloud_suffixes)
-    is_local_web_server = web_host in local_web_hosts
+HH_COOKIE_REFRESH_TEXT = (
+    "Сессия HH не работает.\n\n"
+    "Как обновить:\n"
+    "1. Открой hh.ru в браузере и войди в нужный аккаунт.\n"
+    "2. Открой страницу https://hh.ru/applicant/resumes.\n"
+    "3. В DevTools → Network выбери запрос к /applicant/resumes.\n"
+    "4. Скопируй весь заголовок Cookie из Request Headers.\n"
+    "5. Вставь его в .env в строку HH_SESSION_COOKIE=...\n"
+    "6. Перезапусти JobRadar и нажми в боте «🔗 HH подключение» → «Проверить cookie HH».\n\n"
+    "Пока cookie не обновлены, поиск продолжит работать по публичным страницам, но JobRadar не увидит внешние отклики и резюме."
+)
 
-    if is_local_web_server and is_cloud_app_base:
+
+def warn_if_hh_user_agent_is_placeholder(settings: Settings) -> None:
+    user_agent = settings.hh_user_agent.strip().lower()
+    if not user_agent:
         logger.warning(
-            "ВАЖНО: локальный aiohttp-сервер запущен на %s:%s, но APP_BASE_URL=%s указывает на облачный хост. "
-            "OAuth-авторизация HH не дойдет до локального /auth/hh/callback без ngrok или обратного прокси. "
-            "Для локальной разработки укажите публичный адрес туннеля в APP_BASE_URL и HH_REDIRECT_URI либо используйте "
-            "http://127.0.0.1:%s и такой же адрес возврата в dev.hh.ru.",
-            settings.web_server_host,
-            settings.web_server_port,
-            settings.app_base_url,
-            settings.web_server_port,
+            "HH_USER_AGENT выглядит пустым или служебным: %s. Для HTML-режима лучше указать обычный браузерный User-Agent.",
+            settings.hh_user_agent,
         )
+
+
+def warn_if_hh_cookie_missing(settings: Settings) -> None:
+    if not settings.hh_session_cookie:
+        logger.warning("HH_SESSION_COOKIE не задан. Поиск вакансий может работать, но резюме и личные страницы HH будут недоступны.")
+
+
+async def check_hh_session_on_start(settings: Settings, db: Database, hh_client: HHClient, bot: Bot) -> None:
+    if not settings.hh_session_cookie:
+        db.mark_hh_connected(settings.telegram_user_id, False)
+        logger.warning("%s", HH_COOKIE_REFRESH_TEXT)
+        await notify_user_about_hh_session(bot, settings.telegram_user_id, HH_COOKIE_REFRESH_TEXT)
+        return
+
+    try:
+        await hh_client.get_me(settings.telegram_user_id)
+    except HHApiError as exc:
+        db.mark_hh_connected(settings.telegram_user_id, False)
+        logger.warning(
+            "HH session check failed on startup: status=%s type=%s value=%s. %s",
+            exc.status,
+            exc.error_type,
+            exc.error_value,
+            HH_COOKIE_REFRESH_TEXT,
+        )
+        await notify_user_about_hh_session(bot, settings.telegram_user_id, HH_COOKIE_REFRESH_TEXT)
+        return
+    except Exception:
+        db.mark_hh_connected(settings.telegram_user_id, False)
+        logger.exception("HH session check failed on startup with unexpected error")
+        await notify_user_about_hh_session(bot, settings.telegram_user_id, HH_COOKIE_REFRESH_TEXT)
+        return
+
+    db.mark_hh_connected(settings.telegram_user_id, True)
+    logger.info("HH session check passed on startup: cookie accepted")
+
+
+async def notify_user_about_hh_session(bot: Bot, telegram_user_id: int, text: str) -> None:
+    try:
+        await bot.send_message(telegram_user_id, text)
+    except Exception:
+        logger.exception("Failed to send HH session warning to Telegram")
 
 
 async def main() -> None:
@@ -54,9 +90,25 @@ async def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     settings = load_settings()
-    warn_if_local_oauth_route_is_cloud(settings)
+    warn_if_hh_user_agent_is_placeholder(settings)
+    warn_if_hh_cookie_missing(settings)
     db = Database(settings.database_path)
     db.init()
+
+    if settings.extension_only:
+        logger.info("Запуск JobRadar в автономном режиме расширения (EXTENSION_ONLY)")
+        web_app = create_web_app(settings=settings, db=db, hh_client=None, bot=None, search_service=None)
+        web_runner = web.AppRunner(web_app)
+        try:
+            await web_runner.setup()
+            web_site = web.TCPSite(web_runner, settings.web_server_host, settings.web_server_port)
+            await web_site.start()
+            logger.info("Веб-сервер JobRadar запущен на %s:%s", settings.web_server_host, settings.web_server_port)
+            # Держим цикл событий активным
+            await asyncio.Event().wait()
+        finally:
+            await web_runner.cleanup()
+        return
 
     session = AiohttpSession(proxy=settings.telegram_proxy)
     bot = Bot(token=settings.telegram_bot_token, session=session)
@@ -77,9 +129,11 @@ async def main() -> None:
         scheduler.start()
 
         if await hh_client.ping():
-            logger.info("Связь с HH API успешно установлена")
+            logger.info("Связь с HTML-страницами HH успешно установлена")
         else:
-            logger.warning("Не удалось подключиться к HH API. Проверьте настройки прокси или сеть!")
+            logger.warning("Проверка поиска вакансий HH не прошла. Смотри строку HH HTML ping failed выше: там есть status/type/value, маршрут и рекомендация.")
+
+        await check_hh_session_on_start(settings=settings, db=db, hh_client=hh_client, bot=bot)
 
         logger.info("JobRadar started")
         await dispatcher.start_polling(bot)
@@ -87,7 +141,8 @@ async def main() -> None:
         if scheduler.running:
             scheduler.shutdown(wait=False)
         await web_runner.cleanup()
-        await hh_client.close()
+        if hh_client:
+            await hh_client.close()
 
 
 if __name__ == "__main__":

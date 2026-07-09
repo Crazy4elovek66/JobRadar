@@ -93,6 +93,7 @@ class Database:
 
     def init(self) -> None:
         with closing(self.connect()) as connection, connection:
+            connection.execute("DROP TABLE IF EXISTS hh_tokens")
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS vacancies (
@@ -120,21 +121,6 @@ class Database:
                     is_favorite INTEGER NOT NULL DEFAULT 0,
                     is_rejected_by_user INTEGER NOT NULL DEFAULT 0,
                     UNIQUE(source, external_id)
-                )
-                """
-            )
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS hh_tokens (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    telegram_user_id INTEGER NOT NULL UNIQUE,
-                    hh_user_id TEXT,
-                    hh_user_type TEXT,
-                    access_token_encrypted TEXT NOT NULL,
-                    refresh_token_encrypted TEXT NOT NULL,
-                    expires_at TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
                 )
                 """
             )
@@ -228,6 +214,21 @@ class Database:
                 )
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS extension_analysis (
+                    hh_vacancy_id TEXT PRIMARY KEY,
+                    url TEXT NOT NULL,
+                    title TEXT,
+                    fit INTEGER,
+                    confidence TEXT,
+                    reasons TEXT,
+                    cover_letter TEXT,
+                    raw_vacancy_json TEXT,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
 
     def upsert_vacancy(self, vacancy: Vacancy, score: ScoreResult) -> sqlite3.Row:
         now = utc_now_iso()
@@ -283,7 +284,11 @@ class Database:
                 SELECT external_id
                 FROM vacancies
                 WHERE source = ?
-                  AND (sent_at IS NOT NULL OR is_rejected_by_user = 1)
+                  AND is_rejected_by_user = 1
+                UNION
+                SELECT vacancy_id AS external_id
+                FROM vacancy_log
+                WHERE status = 'applied'
                 """,
                 (source,),
             ).fetchall()
@@ -350,54 +355,10 @@ class Database:
                 (telegram_user_id,),
             ).fetchone()
 
-    def save_hh_tokens(
-        self,
-        telegram_user_id: int,
-        hh_user_id: str | None,
-        hh_user_type: str | None,
-        access_token_encrypted: str,
-        refresh_token_encrypted: str,
-        expires_at: str,
-    ) -> None:
-        now = utc_now_iso()
-        with closing(self.connect()) as connection, connection:
-            connection.execute(
-                """
-                INSERT INTO hh_tokens (
-                    telegram_user_id, hh_user_id, hh_user_type, access_token_encrypted,
-                    refresh_token_encrypted, expires_at, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(telegram_user_id) DO UPDATE SET
-                    hh_user_id = excluded.hh_user_id,
-                    hh_user_type = excluded.hh_user_type,
-                    access_token_encrypted = excluded.access_token_encrypted,
-                    refresh_token_encrypted = excluded.refresh_token_encrypted,
-                    expires_at = excluded.expires_at,
-                    updated_at = excluded.updated_at
-                """,
-                (
-                    telegram_user_id,
-                    hh_user_id,
-                    hh_user_type,
-                    access_token_encrypted,
-                    refresh_token_encrypted,
-                    expires_at,
-                    now,
-                    now,
-                ),
-            )
-        self.update_user_settings(telegram_user_id, hh_connected=1)
+    def mark_hh_connected(self, telegram_user_id: int, connected: bool) -> None:
+        self.update_user_settings(telegram_user_id, hh_connected=1 if connected else 0)
 
-    def get_hh_token_row(self, telegram_user_id: int) -> sqlite3.Row | None:
-        with closing(self.connect()) as connection:
-            return connection.execute(
-                "SELECT * FROM hh_tokens WHERE telegram_user_id = ?",
-                (telegram_user_id,),
-            ).fetchone()
-
-    def delete_hh_tokens(self, telegram_user_id: int) -> None:
-        with closing(self.connect()) as connection, connection:
-            connection.execute("DELETE FROM hh_tokens WHERE telegram_user_id = ?", (telegram_user_id,))
+    def disconnect_hh(self, telegram_user_id: int) -> None:
         self.update_user_settings(
             telegram_user_id,
             hh_connected=0,
@@ -598,6 +559,7 @@ class Database:
             "manual": 0,
             "semi_auto": 0,
             "auto": 0,
+            "external": 0,
             "errors": 0,
         }
         for row in rows:
@@ -612,6 +574,49 @@ class Database:
             elif row["status"] == "applied" and row["apply_mode"] in stats:
                 stats[row["apply_mode"]] += row["count"]
         return stats
+
+    # --- Extension analysis ---
+
+    def get_extension_analysis(self, hh_vacancy_id: str) -> dict | None:
+        with closing(self.connect()) as connection:
+            row = connection.execute(
+                "SELECT * FROM extension_analysis WHERE hh_vacancy_id = ?",
+                (hh_vacancy_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        if result.get("reasons"):
+            try:
+                result["reasons"] = json.loads(result["reasons"])
+            except json.JSONDecodeError:
+                pass
+        result["fit"] = bool(result.get("fit"))
+        # Remove raw_vacancy_json from response to keep it lean
+        result.pop("raw_vacancy_json", None)
+        return result
+
+    def save_extension_analysis(self, data: dict) -> None:
+        with closing(self.connect()) as connection, connection:
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO extension_analysis (
+                    hh_vacancy_id, url, title, fit, confidence,
+                    reasons, cover_letter, raw_vacancy_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    data["hh_vacancy_id"],
+                    data.get("url", ""),
+                    data.get("title"),
+                    1 if data.get("fit") else 0,
+                    data.get("confidence"),
+                    json.dumps(data.get("reasons", []), ensure_ascii=False),
+                    data.get("cover_letter"),
+                    data.get("raw_vacancy_json"),
+                    data.get("created_at", utc_now_iso()),
+                ),
+            )
 
     @staticmethod
     def _json_or_scalar(value: Any) -> Any:

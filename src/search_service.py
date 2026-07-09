@@ -2,15 +2,13 @@ from __future__ import annotations
 
 import json
 import logging
-import random
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from aiogram import Bot
 from aiogram.types import LinkPreviewOptions
 
 from src.apply_service import ApplyService
-from src.cover_letter import build_cover_letter
 from src.database import Database
 from src.hh_client import HHClient
 from src.keyboards import vacancy_keyboard
@@ -30,6 +28,7 @@ class SearchSummary:
     rejected: int = 0
     queued: int = 0
     auto_applied: int = 0
+    external_applied: int = 0
 
 
 class SearchService:
@@ -66,6 +65,7 @@ class SearchService:
             keywords=keywords,
             areas=areas,
             only_remote=bool(settings["only_remote"]),
+            telegram_user_id=user_id if settings["hh_connected"] else None,
         ):
             summary.found += 1
             if vacancy.external_id in ignored_external_ids:
@@ -73,25 +73,24 @@ class SearchService:
             score = calculate_score(vacancy)
             row = self.db.upsert_vacancy(vacancy, score)
             summary.saved += 1
+
+            if self._already_applied_on_hh(vacancy):
+                self.db.mark_sent(row["id"])
+                self._log_external_applied(user_id, vacancy, score)
+                summary.external_applied += 1
+                continue
+
+            if row["sent_at"] or row["is_rejected_by_user"]:
+                continue
+
             self._log_found(user_id, vacancy, score)
 
             if score.status == "REJECT":
                 summary.rejected += 1
                 self.db.upsert_vacancy_log(user_id, vacancy.external_id, status="skipped", skip_reason="Скоринг отклонил вакансию")
                 continue
-            if row["sent_at"] or row["is_rejected_by_user"]:
-                continue
 
             mode = settings["apply_mode"]
-            if mode == "auto" and await self._try_auto_apply(bot, user_id, vacancy, score, settings):
-                summary.auto_applied += 1
-                continue
-            if mode == "semi_auto" and score.score >= settings["min_score_for_semi_auto"] and settings["selected_resume_id"]:
-                letter = build_cover_letter(vacancy, settings)
-                self.db.add_to_queue(user_id, vacancy.external_id, settings["selected_resume_id"], score.score, letter)
-                self.db.upsert_vacancy_log(user_id, vacancy.external_id, status="queued", apply_mode="semi_auto", cover_letter=letter)
-                summary.queued += 1
-                continue
             if score.score < settings["min_score_for_show"]:
                 continue
 
@@ -113,31 +112,8 @@ class SearchService:
             if summary.sent >= max_messages:
                 break
 
-        if summary.queued:
-            await bot.send_message(
-                user_id,
-                f"Нашёл {summary.queued} сильных вакансий и добавил их в очередь полуавтоотклика. Открой «🧾 Мои отклики», чтобы выбрать, куда отправить отклик.",
-                parse_mode="HTML",
-            )
         self.db.update_user_settings(user_id, last_search_at=datetime.now(timezone.utc).isoformat(timespec="seconds"))
         return summary
-
-    async def _try_auto_apply(self, bot: Bot, user_id: int, vacancy: Vacancy, score: ScoreResult, settings) -> bool:
-        if not settings["hh_connected"] or not settings["selected_resume_id"] or not settings["auto_acknowledged_at"]:
-            return False
-        if score.score < settings["min_score_for_auto"]:
-            return False
-        today_stats = self.db.application_stats_today(user_id)
-        if today_stats["auto"] >= settings["auto_daily_limit"]:
-            return False
-        if self.db.get_vacancy_log(user_id, vacancy.external_id) and self.db.get_vacancy_log(user_id, vacancy.external_id)["status"] == "applied":
-            return False
-        delay_minutes = random.randint(settings["auto_delay_min_minutes"], settings["auto_delay_max_minutes"])
-        scheduled_at = (datetime.now(timezone.utc) + timedelta(minutes=delay_minutes)).isoformat(timespec="seconds")
-        letter = build_cover_letter(vacancy, settings)
-        self.db.add_to_queue(user_id, vacancy.external_id, settings["selected_resume_id"], score.score, letter, status="pending", scheduled_at=scheduled_at)
-        self.db.upsert_vacancy_log(user_id, vacancy.external_id, status="queued", apply_mode="auto", cover_letter=letter)
-        return True
 
     def _log_found(self, user_id: int, vacancy: Vacancy, score: ScoreResult) -> None:
         employer = (vacancy.raw.get("employer") or {}) if isinstance(vacancy.raw, dict) else {}
@@ -151,6 +127,34 @@ class SearchService:
             vacancy_url=vacancy.url,
             score=score.score,
         )
+
+    def _log_external_applied(self, user_id: int, vacancy: Vacancy, score: ScoreResult) -> None:
+        detail = self._vacancy_detail(vacancy)
+        employer = (detail.get("employer") or {}) if isinstance(detail, dict) else {}
+        self.db.upsert_vacancy_log(
+            user_id,
+            vacancy.external_id,
+            status="applied",
+            vacancy_name=vacancy.title,
+            employer_id=str(employer.get("id") or ""),
+            employer_name=vacancy.company,
+            vacancy_url=vacancy.url,
+            score=score.score,
+            skip_reason="Отклик уже найден на HH",
+            apply_mode="external",
+            applied_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        )
+
+    @staticmethod
+    def _already_applied_on_hh(vacancy: Vacancy) -> bool:
+        detail = SearchService._vacancy_detail(vacancy)
+        return bool(detail.get("already_applied")) if isinstance(detail, dict) else False
+
+    @staticmethod
+    def _vacancy_detail(vacancy: Vacancy) -> dict[str, object]:
+        if isinstance(vacancy.raw, dict) and isinstance(vacancy.raw.get("detail"), dict):
+            return vacancy.raw["detail"]
+        return {}
 
 
 def format_vacancy_message(vacancy: Vacancy, score: ScoreResult) -> str:

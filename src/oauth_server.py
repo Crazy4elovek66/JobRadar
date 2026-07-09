@@ -1,12 +1,7 @@
 from __future__ import annotations
 
-import base64
-import hashlib
-import hmac
 import json
 import logging
-import time
-from urllib.parse import urlencode
 
 from aiohttp import web
 from aiogram import Bot
@@ -14,6 +9,7 @@ from aiogram import Bot
 from src.config import Settings
 from src.database import Database
 from src.hh_client import HHApiError, HHClient
+from src.extension_service import analyze_vacancy
 from src.search_service import SearchService
 
 
@@ -28,59 +24,14 @@ def create_web_app(settings: Settings, db: Database, hh_client: HHClient, bot: B
     app["bot"] = bot
     app["search_service"] = search_service
     app.router.add_get("/", root)
-    app.router.add_get("/auth/hh/start", hh_start)
-    app.router.add_get("/auth/hh/callback", hh_callback)
     app.router.add_get("/api/cron/search", cron_search)
     app.router.add_get("/cron/search", cron_search)
+    app.router.add_post("/api/extension/analyze", handle_extension_analyze)
     return app
 
 
 async def root(request: web.Request) -> web.Response:
-    return html_page("Бэкенд JobRadar запущен", "Для авторизации перейдите в бота.")
-
-
-async def hh_start(request: web.Request) -> web.Response:
-    settings: Settings = request.app["settings"]
-    telegram_user_id = request.query.get("telegramUserId") or request.query.get("telegram_user_id")
-    if not telegram_user_id:
-        return html_page("Не хватает Telegram ID", "Открой подключение HH из Telegram-бота JobRadar.")
-    if not settings.hh_client_id or not settings.hh_redirect_uri:
-        return html_page("HH не настроен", "В переменных окружения нужны идентификатор приложения HH и адрес возврата.")
-    state = sign_state(settings, {"telegram_user_id": int(telegram_user_id), "ts": int(time.time())})
-    url = f"{settings.hh_oauth_authorize_url}?{urlencode({'response_type': 'code', 'client_id': settings.hh_client_id, 'redirect_uri': settings.hh_redirect_uri, 'state': state})}"
-    raise web.HTTPFound(url)
-
-
-async def hh_callback(request: web.Request) -> web.Response:
-    settings: Settings = request.app["settings"]
-    db: Database = request.app["db"]
-    hh_client: HHClient = request.app["hh_client"]
-    bot: Bot = request.app["bot"]
-    code = request.query.get("code")
-    state = request.query.get("state")
-    if not code or not state:
-        return html_page("HH не подключен", "HH не вернул код авторизации. Попробуй начать подключение заново.")
-    try:
-        state_payload = verify_state(settings, state)
-        telegram_user_id = int(state_payload["telegram_user_id"])
-        token_payload = await hh_client.exchange_code(code)
-        me = await hh_client.save_oauth_tokens(telegram_user_id, token_payload)
-        db.update_user_settings(telegram_user_id, hh_connected=1)
-        await bot.send_message(telegram_user_id, "HH успешно подключен. Теперь можно выбрать резюме и запускать отклики.")
-        try:
-            bot_info = await bot.get_me()
-            redirect_url = f"tg://resolve?domain={bot_info.username}" if bot_info.username else None
-        except Exception:
-            logger.exception("Telegram bot info lookup failed after HH OAuth callback")
-            redirect_url = None
-        return html_page(
-            "HH успешно подключен",
-            "Ваш аккаунт HeadHunter привязан к JobRadar. Сейчас мы вернём вас в Telegram...",
-            redirect_url=redirect_url,
-        )
-    except Exception:
-        logger.exception("HH OAuth callback failed")
-        return html_page("HH не подключен", "Не удалось завершить авторизацию. Проверь настройки приложения HH и попробуй ещё раз.")
+    return html_page("Бэкенд JobRadar запущен", "HH работает через сессионные cookie из .env. OAuth-маршруты отключены.")
 
 
 async def cron_search(request: web.Request) -> web.Response:
@@ -111,29 +62,20 @@ async def cron_search(request: web.Request) -> web.Response:
         }
     )
 
-
-def sign_state(settings: Settings, payload: dict[str, int]) -> str:
-    secret = settings.oauth_state_secret or settings.hh_auto_worker_secret
-    if not secret:
-        raise RuntimeError("Для защиты OAuth нужен секрет подписи в переменных окружения.")
-    raw = base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode("utf-8")).decode("ascii").rstrip("=")
-    signature = hmac.new(secret.encode("utf-8"), raw.encode("ascii"), hashlib.sha256).hexdigest()
-    return f"{raw}.{signature}"
-
-
-def verify_state(settings: Settings, state: str) -> dict[str, int]:
-    secret = settings.oauth_state_secret or settings.hh_auto_worker_secret
-    if not secret:
-        raise RuntimeError("Для защиты OAuth нужен секрет подписи в переменных окружения.")
-    raw, signature = state.split(".", 1)
-    expected = hmac.new(secret.encode("utf-8"), raw.encode("ascii"), hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(signature, expected):
-        raise ValueError("Подпись OAuth-состояния не совпала.")
-    payload = json.loads(base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)).decode("utf-8"))
-    if int(time.time()) - int(payload.get("ts", 0)) > 15 * 60:
-        raise ValueError("OAuth-состояние устарело.")
-    return payload
-
+async def handle_extension_analyze(request: web.Request) -> web.Response:
+    settings: Settings = request.app["settings"]
+    secret = settings.extension_endpoint_secret
+    if not secret or request.headers.get("X-Extension-Secret") != secret:
+        return web.json_response({"error": "forbidden"}, status=403)
+    try:
+        payload = await request.json()
+    except Exception:
+        return web.json_response({"error": "bad json"}, status=400)
+    if not payload.get("hh_vacancy_id"):
+        return web.json_response({"error": "hh_vacancy_id required"}, status=400)
+    db: Database = request.app["db"]
+    result = await analyze_vacancy(db, settings, payload)
+    return web.json_response(result)
 
 def html_page(title: str, text: str, redirect_url: str | None = None) -> web.Response:
     safe_title = title.replace("<", "&lt;").replace(">", "&gt;")

@@ -3,18 +3,33 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 import aiohttp
+from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
 
 BASE_DIR = Path(__file__).resolve().parent
-DEFAULT_API_URL = "https://api.hh.ru"
+HH_BASE_URL = "https://hh.ru"
 IPIFY_URL = "https://api.ipify.org"
 IP_API_URL = "http://ip-api.com/json/{ip}"
+DEFAULT_HH_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+)
+
+
+@dataclass(slots=True)
+class CheckResult:
+    route: str
+    name: str
+    ok: bool
+    status: int | None
+    details: str = ""
 
 
 def env(name: str, default: str = "") -> str:
@@ -32,10 +47,10 @@ def normalize_proxy(proxy: str) -> str | None:
 
 def mask_proxy(proxy: str | None) -> str:
     if not proxy:
-        return "прямое соединение"
+        return "direct"
     parts = urlsplit(proxy)
     if not parts.hostname:
-        return "прокси скрыт"
+        return "proxy"
     netloc = parts.hostname
     if parts.port:
         netloc = f"{netloc}:{parts.port}"
@@ -73,81 +88,96 @@ def load_hh_proxies() -> tuple[str, ...]:
     return tuple(proxies)
 
 
-async def fetch_json(
+def html_headers() -> dict[str, str]:
+    user_agent = browser_user_agent(env("HH_USER_AGENT"))
+    headers = {
+        "User-Agent": user_agent,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.6,en;q=0.4",
+        "Accept-Encoding": "gzip, deflate",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "same-origin",
+        "Sec-Fetch-User": "?1",
+    }
+    if cookie := env("HH_SESSION_COOKIE"):
+        headers["Cookie"] = cookie
+    return headers
+
+
+def browser_user_agent(value: str) -> str:
+    value = value.strip()
+    if not value or value.lower().startswith("jobradar/"):
+        return DEFAULT_HH_USER_AGENT
+    return value
+
+
+async def fetch_text(
     session: aiohttp.ClientSession,
-    method: str,
     url: str,
     *,
     params: dict[str, Any] | None = None,
     proxy: str | None = None,
     timeout: int = 20,
-) -> tuple[int, dict[str, Any] | str]:
-    async with session.request(
-        method,
-        url,
-        params=params,
-        proxy=proxy,
-        timeout=aiohttp.ClientTimeout(total=timeout),
-    ) as response:
-        text = await response.text()
-        try:
-            return response.status, await response.json()
-        except Exception:
-            return response.status, text[:800]
+) -> tuple[int | None, str, str]:
+    try:
+        async with session.get(
+            url,
+            params=params,
+            proxy=proxy,
+            timeout=aiohttp.ClientTimeout(total=timeout),
+            allow_redirects=True,
+        ) as response:
+            return response.status, str(response.url), await response.text()
+    except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        return None, url, str(exc)
 
 
 async def get_route_info(session: aiohttp.ClientSession, proxy: str | None) -> dict[str, Any]:
-    status, ip_payload = await fetch_json(
-        session,
-        "GET",
-        IPIFY_URL,
-        params={"format": "json"},
-        proxy=proxy,
-        timeout=12,
-    )
-    if status >= 400 or not isinstance(ip_payload, dict):
-        return {"ok": False, "error": f"не удалось определить внешний IP: HTTP {status}"}
+    status, _, text = await fetch_text(session, IPIFY_URL, params={"format": "json"}, proxy=proxy, timeout=12)
+    if status != 200:
+        return {"ok": False, "error": f"не удалось определить внешний IP: {status or text}"}
+    try:
+        import json
 
-    ip = str(ip_payload.get("ip") or "").strip()
+        ip = str(json.loads(text).get("ip") or "").strip()
+    except Exception:
+        return {"ok": False, "error": "сервис определения IP вернул неожиданный ответ"}
     if not ip:
         return {"ok": False, "error": "сервис определения IP вернул пустой адрес"}
 
-    status, geo_payload = await fetch_json(
+    status, _, geo_text = await fetch_text(
         session,
-        "GET",
         IP_API_URL.format(ip=ip),
         params={"fields": "status,message,country,regionName,city,query,isp,org,proxy,hosting,mobile,timezone"},
         proxy=proxy,
         timeout=12,
     )
-    if status >= 400 or not isinstance(geo_payload, dict):
-        return {"ok": True, "ip": ip, "geo_error": f"геобаза недоступна: HTTP {status}"}
-    if geo_payload.get("status") == "fail":
-        return {"ok": True, "ip": ip, "geo_error": geo_payload.get("message") or "геобаза не распознала IP"}
+    if status != 200:
+        return {"ok": True, "ip": ip, "geo_error": f"геобаза недоступна: {status or geo_text}"}
+    try:
+        import json
 
-    return {"ok": True, "ip": ip, **geo_payload}
+        geo = json.loads(geo_text)
+    except Exception:
+        return {"ok": True, "ip": ip, "geo_error": "геобаза вернула неожиданный ответ"}
+    if geo.get("status") == "fail":
+        return {"ok": True, "ip": ip, "geo_error": geo.get("message") or "геобаза не распознала IP"}
+    return {"ok": True, "ip": ip, **geo}
 
 
-def print_route_info(title: str, proxy: str | None, route: dict[str, Any]) -> None:
-    print(f"\n== {title} ==")
-    print(f"Маршрут: {mask_proxy(proxy)}")
+def print_route_info(proxy: str | None, route: dict[str, Any]) -> None:
+    print(f"\n== Маршрут {mask_proxy(proxy)} ==")
     if not route.get("ok"):
-        print(f"Ошибка: {route.get('error')}")
+        print(f"IP: ошибка, {route.get('error')}")
         return
-
-    location = ", ".join(
-        part
-        for part in (
-            route.get("country"),
-            route.get("regionName"),
-            route.get("city"),
-        )
-        if part
-    )
+    location = ", ".join(str(route.get(key)) for key in ("country", "regionName", "city") if route.get(key))
     print(f"Внешний IP: {route.get('ip') or route.get('query')}")
     print(f"Регион выхода: {location or 'не определён'}")
-    if route.get("isp") or route.get("org"):
-        print(f"Провайдер/организация: {route.get('isp') or 'не указано'} / {route.get('org') or 'не указано'}")
+    print(f"Провайдер/организация: {route.get('isp') or 'не указано'} / {route.get('org') or 'не указано'}")
     flags = []
     if route.get("proxy"):
         flags.append("proxy/VPN")
@@ -155,130 +185,81 @@ def print_route_info(title: str, proxy: str | None, route: dict[str, Any]) -> No
         flags.append("hosting/DC")
     if route.get("mobile"):
         flags.append("mobile")
-    print(f"Признаки маршрута: {', '.join(flags) if flags else 'похоже на обычное соединение'}")
+    print(f"Признаки маршрута: {', '.join(flags) if flags else 'обычное соединение'}")
     if route.get("geo_error"):
         print(f"Геобаза: {route['geo_error']}")
 
 
-def print_result(title: str, status: int, payload: dict[str, Any] | str) -> None:
-    print(f"\n== {title} ==")
-    print(f"HTTP {status}")
-    if isinstance(payload, dict):
-        errors = payload.get("errors")
-        if errors:
-            print(f"Ошибки HH: {errors}")
-            print(explain_errors(errors))
-            return
-        if "items" in payload:
-            print(f"Получено элементов: {len(payload.get('items') or [])}")
-            print(f"Всего найдено по версии HH: {payload.get('found', 'не указано')}")
-            return
-        print(payload)
-        return
-    print(payload)
-
-
-def explain_errors(errors: Any) -> str:
-    if not isinstance(errors, list):
-        return "Не удалось разобрать ошибку HH."
-
-    explanations: list[str] = []
-    for error in errors:
-        if not isinstance(error, dict):
-            continue
-        error_type = error.get("type")
-        value = error.get("value")
-        if error_type == "bad_user_agent":
-            explanations.append("Проверь HH_USER_AGENT: он должен быть передан и не должен быть шаблонным.")
-        elif error_type == "bad_argument":
-            explanations.append(f"Некорректный параметр запроса: {value or 'не указан'}.")
-        elif error_type == "oauth":
-            explanations.append(f"Проблема с OAuth-токеном: {value or 'без уточнения'}.")
-        elif error_type == "captcha_required":
-            explanations.append("HH требует капчу. Нужно снизить частоту запросов или проверить сетевой маршрут.")
-        elif error_type == "forbidden":
-            explanations.append("HH запретил доступ к методу с текущего маршрута или клиента.")
-        else:
-            explanations.append(f"Неизвестный тип ошибки: {error_type}, значение: {value}.")
-    return "\n".join(explanations) or "Нет подробного объяснения."
-
-
-async def check_hh(
-    session: aiohttp.ClientSession,
-    *,
-    api_url: str,
-    hh_host: str,
-    hh_area: str,
-    access_token: str,
-    proxy: str | None,
-) -> None:
-    status, payload = await fetch_json(
+async def check_search(session: aiohttp.ClientSession, proxy: str | None) -> CheckResult:
+    status, final_url, text = await fetch_text(
         session,
-        "GET",
-        f"{api_url}/vacancies",
-        params={"host": hh_host, "text": "python", "area": hh_area, "per_page": 5},
+        f"{HH_BASE_URL}/search/vacancy",
+        params={"text": "python", "area": "113", "per_page": 1},
         proxy=proxy,
     )
-    print_result(f"GET /vacancies через {mask_proxy(proxy)}", status, payload)
+    if status is None or status >= 400:
+        return CheckResult(mask_proxy(proxy), "GET /search/vacancy", False, status, final_url)
+    soup = BeautifulSoup(text, "lxml")
+    count = len(soup.select('[data-qa="vacancy-serp__vacancy"], [data-vacancy-id]'))
+    return CheckResult(mask_proxy(proxy), "GET /search/vacancy", True, status, f"карточек найдено: {count}")
 
-    if access_token:
-        status, payload = await fetch_json(session, "GET", f"{api_url}/me", proxy=proxy)
-        print_result(f"GET /me через {mask_proxy(proxy)}", status, payload)
-    else:
-        print("\n== GET /me ==")
-        print("Пропущено: HH_ACCESS_TOKEN не задан.")
+
+async def check_resumes(session: aiohttp.ClientSession, proxy: str | None) -> CheckResult:
+    if not env("HH_SESSION_COOKIE"):
+        return CheckResult(mask_proxy(proxy), "GET /applicant/resumes", False, None, "HH_SESSION_COOKIE не задан")
+    status, final_url, text = await fetch_text(session, f"{HH_BASE_URL}/applicant/resumes", proxy=proxy)
+    if status is None or status >= 400:
+        return CheckResult(mask_proxy(proxy), "GET /applicant/resumes", False, status, final_url)
+    lowered = f"{final_url}\n{text[:2000]}".lower()
+    if "/account/login" in lowered or "войти в личный кабинет" in lowered:
+        return CheckResult(mask_proxy(proxy), "GET /applicant/resumes", False, status, "HH не принял cookie и показал вход")
+    soup = BeautifulSoup(text, "lxml")
+    resume_links = len(soup.select('a[href*="/resume/"]'))
+    return CheckResult(mask_proxy(proxy), "GET /applicant/resumes", True, status, f"ссылок на резюме найдено: {resume_links}")
+
+
+def print_result(result: CheckResult) -> None:
+    verdict = "ОК" if result.ok else "СБОЙ"
+    status = result.status if result.status is not None else "нет HTTP-ответа"
+    print(f"{verdict} {result.name}: статус {status}. {result.details}")
+
+
+def final_diagnosis(results: list[CheckResult]) -> str:
+    search_ok = any(item.ok and item.name == "GET /search/vacancy" for item in results)
+    resumes = [item for item in results if item.name == "GET /applicant/resumes"]
+    resumes_ok = any(item.ok for item in resumes)
+    if search_ok and resumes_ok:
+        return "HTML-доступ к HH работает, cookie приняты."
+    if search_ok and not env("HH_SESSION_COOKIE"):
+        return "Публичный поиск работает, но HH_SESSION_COOKIE не задан: личные страницы недоступны."
+    if search_ok:
+        return "Публичный поиск работает, но cookie для личных страниц не прошли проверку."
+    return "HTML-доступ к HH не прошёл проверку. Проверь IP-маршрут, VPN/прокси и актуальность cookie."
 
 
 async def main() -> None:
     load_dotenv(BASE_DIR / ".env", override=True)
-
-    api_url = (env("HH_API_BASE", DEFAULT_API_URL) or DEFAULT_API_URL).rstrip("/")
-    hh_host = env("HH_HOST", "hh.ru") or "hh.ru"
-    hh_area = env("HH_AREA", "113") or "113"
-    user_agent = env("HH_USER_AGENT", "JobRadar/1.0 (email@example.com)") or "JobRadar/1.0 (email@example.com)"
-    access_token = env("HH_ACCESS_TOKEN")
     proxies = load_hh_proxies()
-    route_limit = max(1, int(env("CHECK_HH_ROUTE_LIMIT", "3") or "3"))
+    proxy_mode = env("HH_PROXY_MODE", "direct_then_proxy") or "direct_then_proxy"
 
-    headers = {
-        "User-Agent": user_agent,
-        "HH-User-Agent": user_agent,
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "ru-RU,ru;q=0.9",
-    }
-    if access_token:
-        headers["Authorization"] = f"Bearer {access_token}"
-
-    print("Проверка HH API для JobRadar")
-    print(f"HH_API_BASE={api_url}")
-    print(f"HH_HOST={hh_host}")
-    print(f"HH_AREA={hh_area}")
-    print(f"HH_USER_AGENT={user_agent}")
-    print(f"HH_ACCESS_TOKEN={'задан' if access_token else 'не задан'}")
+    print("Проверка HTML-доступа HH для JobRadar")
+    print(f"HH_USER_AGENT={browser_user_agent(env('HH_USER_AGENT'))}")
+    print(f"HH_SESSION_COOKIE={'задан' if env('HH_SESSION_COOKIE') else 'не задан'}")
+    print(f"HH_PROXY_MODE={proxy_mode}")
     print(f"HH-прокси загружено: {len(proxies)}")
-    if proxies:
-        print("Важно: основной бот будет ходить в HH через загруженные прокси, а не через чистое прямое соединение.")
 
-    async with aiohttp.ClientSession(headers=headers) as session:
-        direct_route = await get_route_info(session, proxy=None)
-        print_route_info("Прямой выход в интернет", None, direct_route)
-
-        candidates: list[str | None] = list(proxies[:route_limit]) if proxies else [None]
-        if len(proxies) > route_limit:
-            print(f"\nПроверяю первые {route_limit} прокси из {len(proxies)}. Лимит можно изменить через CHECK_HH_ROUTE_LIMIT.")
-
+    candidates: list[str | None] = [None, *proxies]
+    all_results: list[CheckResult] = []
+    async with aiohttp.ClientSession(headers=html_headers()) as session:
         for proxy in candidates:
-            if proxy:
-                route = await get_route_info(session, proxy=proxy)
-                print_route_info("Выход через HH-прокси", proxy, route)
-            await check_hh(
-                session,
-                api_url=api_url,
-                hh_host=hh_host,
-                hh_area=hh_area,
-                access_token=access_token,
-                proxy=proxy,
-            )
+            route = await get_route_info(session, proxy)
+            print_route_info(proxy, route)
+            for result in (await check_search(session, proxy), await check_resumes(session, proxy)):
+                print_result(result)
+                all_results.append(result)
+
+    print("\n== Итог ==")
+    print(final_diagnosis(all_results))
 
 
 if __name__ == "__main__":

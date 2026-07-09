@@ -55,6 +55,21 @@ class ApplyService:
             return ApplyResult(False, exc.args[0], exc.error_type, exc.error_value)
 
         vacancy = vacancy_from_detail(detail)
+        if detail.get("already_applied"):
+            self.db.upsert_vacancy_log(
+                telegram_user_id,
+                vacancy_id,
+                status="applied",
+                vacancy_name=vacancy.title,
+                employer_id=str((detail.get("employer") or {}).get("id") or ""),
+                employer_name=vacancy.company,
+                vacancy_url=vacancy.url,
+                apply_mode="external",
+                cover_letter=message,
+                applied_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            )
+            return ApplyResult(False, "На эту вакансию уже был отклик на HH. Я записал её в журнал и не отправляю повторно.", error_value="already_applied")
+
         block_reason = self._blocking_reason(detail, settings)
         if block_reason:
             self.db.upsert_vacancy_log(
@@ -120,7 +135,7 @@ class ApplyService:
         if detail.get("archived"):
             return "Вакансия уже в архиве. Отклик не отправляю."
         if detail.get("has_test") and settings["auto_skip_has_test"]:
-            return "Для вакансии нужен тест. Через API такой отклик не отправляю, открой вакансию на HH."
+            return "Для вакансии нужен тест. Открой вакансию на HH и пройди его вручную."
         if detail.get("response_url") and settings["auto_skip_external_response_url"]:
             return "Работодатель просит внешний отклик. Автоматически не отправляю."
         if detail.get("response_letter_required") and settings["auto_skip_required_letter"]:

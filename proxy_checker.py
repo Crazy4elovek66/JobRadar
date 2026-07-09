@@ -9,12 +9,12 @@ import aiohttp
 
 INPUT_FILE = "proxies.txt"
 OUTPUT_FILE = "good_proxies.txt"
-TEST_URL = "https://api.hh.ru/vacancies?text=test&area=113&per_page=1"
+TEST_URL = "https://hh.ru/search/vacancy?text=test&area=113&per_page=1"
 CONCURRENCY = 20
 TIMEOUT = 12
 HEADERS = {
-    "User-Agent": "JobRadar/1.0 (contact: local)",
-    "Accept": "application/json, text/plain, */*",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "ru-RU,ru;q=0.9",
 }
 
@@ -79,7 +79,7 @@ async def main() -> None:
         return
 
     print(f"Загружено прокси: {len(proxies)}.")
-    print("Проверяю именно /vacancies, потому что /dictionaries может открываться даже при блокировке поиска.\n")
+    print("Проверяю HTML-выдачу /search/vacancy, потому что JobRadar теперь работает со страницами hh.ru.\n")
 
     queue: asyncio.Queue[str] = asyncio.Queue()
     for proxy in proxies:

@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "name": "JobRadar - анализ вакансий hh.ru",
+  "version": "1.0.0",
+  "description": "Анализирует открытую вакансию hh.ru через ИИ и готовит отклик",
+  "permissions": ["storage", "activeTab"],
+  "host_permissions": ["https://*.hh.ru/*", "http://127.0.0.1:8080/*", "http://localhost:8080/*"],
+  "background": { "service_worker": "background.js" },
+  "content_scripts": [
+    {
+      "matches": ["https://*.hh.ru/vacancy/*"],
+      "js": ["content_script.js"],
+      "css": ["overlay.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": { "default_title": "JobRadar" },
+  "options_page": "options.html",
+  "icons": { "128": "icons/icon128.png" }
+}
