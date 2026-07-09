@@ -7,7 +7,7 @@ from aiohttp.test_utils import make_mocked_request
 
 from src.database import Database
 from src.extension_prompt import build_user_prompt
-from src.extension_service import _parse_ai_response, analyze_vacancy
+from src.extension_service import _parse_ai_response, analyze_vacancy, _sanitize_cover_letter
 from src.oauth_server import handle_extension_analyze
 from src.config import Settings
 
@@ -116,3 +116,18 @@ async def test_handle_extension_analyze_unauthorized():
     req = make_mocked_request("POST", "/api/extension/analyze", headers=headers, app=app)
     resp = await handle_extension_analyze(req)
     assert resp.status == 403
+
+
+def test_sanitize_cover_letter():
+    raw_text = (
+        "Здравствуйте! Меня зовут Дмитрий. Хочу откликнуться на вакансию.\n"
+        "**Опыт**: 2 года.\n"
+        "С уважением, Дмитрий."
+    )
+    sanitized = _sanitize_cover_letter(raw_text)
+    assert "Здравствуйте!" not in sanitized
+    assert "Меня зовут" not in sanitized
+    assert "С уважением" not in sanitized
+    assert "**Опыт**" not in sanitized
+    assert "Опыт: 2 года" in sanitized
+

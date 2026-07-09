@@ -32,6 +32,51 @@ def _parse_ai_response(raw: str) -> dict:
     return json.loads(text)
 
 
+_GREETING_PATTERNS = [
+    r'^\s*(здравствуйте|добрый\s+день|добрый\s+вечер|доброе\s+утро|приветствую|привет)[!,.\s-]*',
+    r'^\s*меня\s+зовут[^.\n]*[.\n]\s*',
+    r'^\s*разрешите\s+представиться[^.\n]*[.\n]\s*',
+]
+
+_SIGNOFF_PATTERNS = [
+    r'\s*с\s+уважением[,.\s]*[^\n]*$',
+    r'\s*заранее\s+спасибо[^\n]*$',
+    r'\s*буду\s+рад[а]?\s+сотрудничеству[^\n]*$',
+    r'\s*жду\s+обратной\s+связи[^\n]*$',
+]
+
+
+def _sanitize_cover_letter(text: str | None) -> str | None:
+    """Защитный пост-процессинг: вырезает приветствия, представления по
+    имени, прощальные клише и markdown-разметку, если модель всё же их
+    вставила вопреки промпту."""
+    if not text:
+        return text
+
+    cleaned = text.strip()
+
+    # Приветствия и самопредставление в начале (возможно, несколько подряд)
+    for _ in range(3):
+        before = cleaned
+        for pattern in _GREETING_PATTERNS:
+            cleaned = re.sub(pattern, '', cleaned, flags=re.IGNORECASE)
+        cleaned = cleaned.strip()
+        if cleaned == before:
+            break
+
+    # Прощание/подпись в конце
+    for pattern in _SIGNOFF_PATTERNS:
+        cleaned = re.sub(pattern, '', cleaned, flags=re.IGNORECASE)
+
+    # Markdown-разметка
+    cleaned = re.sub(r'\*\*(.+?)\*\*', r'\1', cleaned)   # **жирный**
+    cleaned = re.sub(r'__(.+?)__', r'\1', cleaned)        # __жирный__
+    cleaned = re.sub(r'^#{1,6}\s*', '', cleaned, flags=re.MULTILINE)  # ## заголовки
+    cleaned = cleaned.replace('—', '-')                   # длинное тире
+
+    return cleaned.strip()
+
+
 async def _call_openrouter(system_prompt: str, user_prompt: str, api_key: str, model: str) -> str:
     logger.info("Отправка запроса к OpenRouter. Модель: %s", model)
     async with aiohttp.ClientSession() as session:
@@ -136,7 +181,7 @@ async def analyze_vacancy(db: Database, settings: Settings, vacancy_data: dict) 
         "fit": bool(parsed.get("fit", False)),
         "confidence": parsed.get("confidence", "низкая"),
         "reasons": parsed.get("reasons", []),
-        "cover_letter": parsed.get("cover_letter"),
+        "cover_letter": _sanitize_cover_letter(parsed.get("cover_letter")),
     }
 
     # Save to DB
