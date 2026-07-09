@@ -131,3 +131,11 @@ def test_sanitize_cover_letter():
     assert "**Опыт**" not in sanitized
     assert "Опыт: 2 года" in sanitized
 
+
+def test_sanitize_cover_letter_greeting_with_vas():
+    raw_text = "Приветствую Вас! Хочу откликнуться.\nОпыт есть."
+    sanitized = _sanitize_cover_letter(raw_text)
+    assert not sanitized.startswith("Вас")
+    assert "Приветствую" not in sanitized
+    assert "Хочу откликнуться" in sanitized
+

@@ -1,11 +1,28 @@
-# Патч для src/extension_service.py
+# Фикс-патч для src/extension_service.py
 
-Промпт ужесточён, но маленькая модель (gemini-2.5-flash-lite) не даёт 100%
-гарантии соблюдения инструкции. Добавляем защитный пост-процессинг как
-второй рубеж - если модель всё равно вставит приветствие или markdown,
-код сам их вырежет перед сохранением в БД.
+## Что нашёл при проверке
 
-## 1. Добавить функцию (рядом с `_parse_ai_response`)
+Прогнал `_sanitize_cover_letter` на нескольких кейсах, которых нет в
+твоём тесте. Один реально ломается:
+
+```
+Вход:  "Приветствую Вас! Хочу откликнуться.\nОпыт есть."
+Выход: "Вас! Хочу откликнуться.\nОпыт есть."
+```
+
+Причина: паттерн для "приветствую" обрезает само слово, но не слово
+"Вас" после него - в символьном классе `[!,.\s-]*` нет букв, поэтому
+регэксп останавливается перед "В" и оставляет висящий обрубок "Вас!"
+в начале текста. Это заметнее и хуже, чем если бы приветствие вообще
+не тронули - выглядит как явный баг, а не как деловой текст.
+
+Остальные кейсы (Здравствуйте+Меня зовут, С уважением в конце, Буду рад
+сотрудничеству, markdown **жирный**, Заранее спасибо) отработали чисто -
+их не трогаем.
+
+## Фикс
+
+Заменить строку паттерна для приветствий:
 
 ```python
 _GREETING_PATTERNS = [
@@ -13,90 +30,40 @@ _GREETING_PATTERNS = [
     r'^\s*меня\s+зовут[^.\n]*[.\n]\s*',
     r'^\s*разрешите\s+представиться[^.\n]*[.\n]\s*',
 ]
+```
 
-_SIGNOFF_PATTERNS = [
-    r'\s*с\s+уважением[,.\s]*[^\n]*$',
-    r'\s*заранее\s+спасибо[^\n]*$',
-    r'\s*буду\s+рад[а]?\s+сотрудничеству[^\n]*$',
-    r'\s*жду\s+обратной\s+связи[^\n]*$',
+на:
+
+```python
+_GREETING_PATTERNS = [
+    r'^\s*(здравствуйте|здравствуй|добрый\s+день|добрый\s+вечер|доброе\s+утро|'
+    r'приветствую(\s+вас|\s+тебя)?|привет)[!,.\s-]*',
+    r'^\s*меня\s+зовут[^.\n]*[.\n]\s*',
+    r'^\s*разрешите\s+представиться[^.\n]*[.\n]\s*',
 ]
-
-
-def _sanitize_cover_letter(text: str | None) -> str | None:
-    """Защитный пост-процессинг: вырезает приветствия, представления по
-    имени, прощальные клише и markdown-разметку, если модель всё же их
-    вставила вопреки промпту."""
-    if not text:
-        return text
-
-    cleaned = text.strip()
-
-    # Приветствия и самопредставление в начале (возможно, несколько подряд)
-    for _ in range(3):
-        before = cleaned
-        for pattern in _GREETING_PATTERNS:
-            cleaned = re.sub(pattern, '', cleaned, flags=re.IGNORECASE)
-        cleaned = cleaned.strip()
-        if cleaned == before:
-            break
-
-    # Прощание/подпись в конце
-    for pattern in _SIGNOFF_PATTERNS:
-        cleaned = re.sub(pattern, '', cleaned, flags=re.IGNORECASE)
-
-    # Markdown-разметка
-    cleaned = re.sub(r'\*\*(.+?)\*\*', r'\1', cleaned)   # **жирный**
-    cleaned = re.sub(r'__(.+?)__', r'\1', cleaned)        # __жирный__
-    cleaned = re.sub(r'^#{1,6}\s*', '', cleaned, flags=re.MULTILINE)  # ## заголовки
-    cleaned = cleaned.replace('—', '-')                   # длинное тире
-
-    return cleaned.strip()
 ```
 
-## 2. Применить в `analyze_vacancy`, сразу после парсинга ответа
+Добавлены: "здравствуй" (без "-те"), и опциональное "вас"/"тебя" сразу
+после "приветствую", которое раньше повисало в тексте.
 
-Найти в текущем коде:
+## Проверка
+
+```bash
+python3 -c "
+from src.extension_service import _sanitize_cover_letter
+print(_sanitize_cover_letter('Приветствую Вас! Хочу откликнуться.\nОпыт есть.'))
+"
+```
+
+Ожидаемый результат: `Хочу откликнуться.\nОпыт есть.` (без "Вас!" в начале).
+
+Заодно советую добавить этот кейс в `tests/test_extension.py` рядом с
+`test_sanitize_cover_letter`, чтобы регресс не вернулся молча:
 
 ```python
-    # Build result
-    result = {
-        "hh_vacancy_id": hh_vacancy_id,
-        "url": vacancy_data.get("url", ""),
-        "title": vacancy_data.get("title"),
-        "fit": bool(parsed.get("fit", False)),
-        "confidence": parsed.get("confidence", "низкая"),
-        "reasons": parsed.get("reasons", []),
-        "cover_letter": parsed.get("cover_letter"),
-    }
+def test_sanitize_cover_letter_greeting_with_vas():
+    raw_text = "Приветствую Вас! Хочу откликнуться.\nОпыт есть."
+    sanitized = _sanitize_cover_letter(raw_text)
+    assert not sanitized.startswith("Вас")
+    assert "Приветствую" not in sanitized
 ```
-
-Заменить последнюю строку на:
-
-```python
-    # Build result
-    result = {
-        "hh_vacancy_id": hh_vacancy_id,
-        "url": vacancy_data.get("url", ""),
-        "title": vacancy_data.get("title"),
-        "fit": bool(parsed.get("fit", False)),
-        "confidence": parsed.get("confidence", "низкая"),
-        "reasons": parsed.get("reasons", []),
-        "cover_letter": _sanitize_cover_letter(parsed.get("cover_letter")),
-    }
-```
-
-`re` уже импортирован в файле (используется в `_parse_ai_response`) - новых
-зависимостей не требуется.
-
-## 3. Как проверить, что сработало
-
-1. Заменить `src/extension_prompt.py` на версию из `extension_prompt.py`
-   (готовый файл рядом с этим патчем).
-2. Внести патч выше в `src/extension_service.py`.
-3. Перезапустить `python main.py`.
-4. Прогнать 3-5 разных вакансий через расширение (junior-техподдержка,
-   QA, Python-backend) - проверить, что `cover_letter` начинается сразу
-   с содержательного предложения, без "Здравствуйте"/"Меня зовут", и
-   заканчивается без "С уважением".
-5. Если модель всё равно проскочит через оба рубежа на какой-то формулировке -
-   скинь мне конкретный проблемный ответ, дожму паттерны точечно под него.
