@@ -9,6 +9,7 @@ from aiogram.client.session.aiohttp import AiohttpSession
 from src.bot import build_dispatcher
 from src.config import Settings, load_settings
 from src.database import Database
+from src.db_migrations import migrate_database
 from src.apply_service import ApplyService
 from src.hh_client import HHApiError, HHClient
 from src.oauth_server import create_web_app
@@ -94,6 +95,7 @@ async def main() -> None:
     warn_if_hh_cookie_missing(settings)
     db = Database(settings.database_path)
     db.init()
+    migrate_database(db)
 
     if settings.extension_only:
         logger.info("Запуск JobRadar в автономном режиме расширения (EXTENSION_ONLY)")
